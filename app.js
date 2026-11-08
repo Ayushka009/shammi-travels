@@ -46,21 +46,21 @@ async function loadSettings() {
 
 async function route() {
   if (!sb) return;
-  const [page = 'dashboard', a, b] = location.hash.replace(/^#\//, '').split('/');
-  document.querySelectorAll('nav a').forEach((l) => l.classList.toggle('on', l.getAttribute('href') === `#/${page}${page === 'list' ? '/' + a : ''}`));
+  const [page = 'dashboard', a, b, c] = location.hash.replace(/^#\//, '').split('/');
+  document.querySelectorAll('nav a').forEach((l) => l.classList.toggle('on', l.getAttribute('href') === `#/${page === 'customer' ? 'customers' : page}${page === 'list' ? '/' + a : ''}`));
   const v = $('#view');
   v.innerHTML = '<p class="muted">Loading…</p>';
   try {
     await loadSettings();
-    const fn = { dashboard, customers, list, edit, view, settings }[page] || dashboard;
-    await fn(v, a, b);
+    const fn = { dashboard, customers, customer, list, edit, view, settings }[page] || dashboard;
+    await fn(v, a, b, c);
   } catch (e) { v.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
 window.addEventListener('hashchange', route);
 
 /* ---------- dashboard ---------- */
 async function dashboard(v) {
-  const docs = await q(sb.from('documents').select('id,type,number,status,total,issue_date,customers(name)').order('created_at', { ascending: false }));
+  const docs = await q(sb.from('documents').select('id,type,number,status,total,issue_date,customer_id,customers(name)').order('created_at', { ascending: false }));
   const inv = docs.filter((d) => d.type === 'invoice');
   const quo = docs.filter((d) => d.type === 'quotation');
   const sum = (a) => a.reduce((s, d) => s + Number(d.total), 0);
@@ -88,11 +88,11 @@ async function dashboard(v) {
 }
 
 /* ---------- lists ---------- */
-const table = (rows) => rows.length ? `<div class="tablewrap"><table><thead><tr><th>No.</th><th>Customer</th><th>Date</th><th class="num">Total</th><th>Status</th></tr></thead><tbody>${rows.map((d) =>
-  `<tr><td><a href="#/view/${d.id}">${esc(d.number)}</a></td><td>${esc(d.customers?.name)}</td><td>${esc(d.issue_date)}</td><td class="num">${d.total > 0 ? money(d.total) : '-'}</td><td>${esc(d.status)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">Nothing here yet.</p>';
+const table = (rows, hideCust = false) => rows.length ? `<div class="tablewrap"><table><thead><tr><th>No.</th>${hideCust ? '' : '<th>Customer</th>'}<th>Date</th><th class="num">Total</th><th>Status</th></tr></thead><tbody>${rows.map((d) =>
+  `<tr><td><a href="#/view/${d.id}">${esc(d.number)}</a></td>${hideCust ? '' : `<td><a href="#/customer/${d.customer_id}">${esc(d.customers?.name)}</a></td>`}<td>${esc(d.issue_date)}</td><td class="num">${d.total > 0 ? money(d.total) : '-'}</td><td>${esc(d.status)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">Nothing here yet.</p>';
 
 async function list(v, type = 'invoice') {
-  const rows = await q(sb.from('documents').select('id,number,status,total,issue_date,customers(name)').eq('type', type).order('created_at', { ascending: false }));
+  const rows = await q(sb.from('documents').select('id,number,status,total,issue_date,customer_id,customers(name)').eq('type', type).order('created_at', { ascending: false }));
   v.innerHTML = `<div class="row"><h2>${LABEL[type]}s</h2><a href="#/edit/${type}"><button class="primary">New ${LABEL[type].toLowerCase()}</button></a></div><div class="card">${table(rows)}</div>`;
 }
 
@@ -115,6 +115,23 @@ async function settings(v) {
   };
 }
 
+/* ---------- one customer: everything for them ---------- */
+async function customer(v, id) {
+  const [c, docs] = await Promise.all([
+    q(sb.from('customers').select('*').eq('id', id).single()),
+    q(sb.from('documents').select('id,type,number,status,total,issue_date,customer_id').eq('customer_id', id).order('issue_date', { ascending: false })),
+  ]);
+  const by = (t) => docs.filter((d) => d.type === t);
+  const sum = (a) => a.reduce((s, d) => s + Number(d.total), 0);
+  const inv = by('invoice');
+  const paid = inv.filter((d) => d.status === 'paid'), owed = inv.filter((d) => d.status === 'sent' || d.status === 'draft');
+  const block = (t, title) => `<div class="card"><div class="row"><h3>${title} (${by(t).length})</h3><a href="#/edit/${t}/-/${id}"><button class="primary">New ${LABEL[t].toLowerCase()}</button></a></div>${table(by(t), true)}</div>`;
+  v.innerHTML = `<div class="row"><h2>${esc(c.name)}</h2><a href="#/customers"><button>All customers</button></a></div>
+    <div class="card"><span class="muted">${esc([c.phone, c.email, c.address].filter(Boolean).join(' · ')) || 'No contact details'}</span></div>
+    <div class="grid"><div class="card stat"><span class="muted">Paid</span><b>${money(sum(paid))}</b></div><div class="card stat"><span class="muted">Outstanding</span><b>${money(sum(owed))}</b></div></div>
+    ${block('invoice', 'Invoices')}${block('quotation', 'Quotations')}${block('agreement', 'Agreements')}`;
+}
+
 /* ---------- customers ---------- */
 async function customers(v) {
   const rows = await q(sb.from('customers').select('*').order('name'));
@@ -124,7 +141,7 @@ async function customers(v) {
       <label>Email <input name="email" type="email"></label><label>Address <input name="address"></label>
       <div><button class="primary">Add customer</button></div></form>
     <div class="card tablewrap"><table><thead><tr><th>Name</th><th>Phone</th><th>Email</th><th></th></tr></thead><tbody>${rows.map((c) =>
-      `<tr><td>${esc(c.name)}<br><span class="muted">${esc(c.address)}</span></td><td>${esc(c.phone)}</td><td>${esc(c.email)}</td><td><button class="danger" data-del="${c.id}">Delete</button></td></tr>`).join('')}</tbody></table></div>`;
+      `<tr><td><a href="#/customer/${c.id}">${esc(c.name)}</a><br><span class="muted">${esc(c.address)}</span></td><td>${esc(c.phone)}</td><td>${esc(c.email)}</td><td><button class="danger" data-del="${c.id}">Delete</button></td></tr>`).join('')}</tbody></table></div>`;
   $('#cf').onsubmit = async (e) => {
     e.preventDefault();
     try { await q(sb.from('customers').insert(Object.fromEntries(new FormData(e.target)))); route(); } catch (err) { alert(err.message); }
@@ -150,12 +167,13 @@ async function nextInsert(row) {
   throw new Error('Could not allocate a document number');
 }
 
-async function edit(v, type, id) {
+async function edit(v, type, id, cid) {
+  if (id === '-') id = undefined; // '-' = new document (lets the 4th segment carry a customer id)
   const [custs, existing] = await Promise.all([
     q(sb.from('customers').select('id,name').order('name')),
     id ? q(sb.from('documents').select('*').eq('id', id).single()) : null,
   ]);
-  const d = existing || { type, status: 'draft', issue_date: today(), items: [newItem()], tax_rate: 0, data: { terms: CONFIG.DEFAULT_TERMS }, notes: '' };
+  const d = existing || { type, customer_id: cid, status: 'draft', issue_date: today(), items: [newItem()], tax_rate: 0, data: { terms: CONFIG.DEFAULT_TERMS }, notes: '' };
   type = d.type;
   const f = d.data || {};
   const agr = type === 'agreement';
@@ -246,6 +264,7 @@ async function view(v, id) {
   v.innerHTML = `<div class="row noprint"><span>
       <button class="primary" id="print">Print / Save PDF</button>
       <a href="#/edit/${d.type}/${d.id}"><button>Edit</button></a>
+      <a href="#/customer/${d.customer_id}"><button>Customer</button></a>
       ${d.type === 'quotation' ? '<button id="conv">Convert to invoice</button>' : ''}
       <button class="danger" id="del">Delete</button></span>
       <label style="margin:0">Status <select id="st">${STATUS[d.type].map((s) => `<option ${s === d.status ? 'selected' : ''}>${s}</option>`).join('')}</select></label></div>

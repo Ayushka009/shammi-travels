@@ -68,3 +68,6 @@ th,td{padding:8px;border-bottom:1px solid var(--line);text-align:left;vertical-a
 .logo-sm{height:40px;width:auto}
 .logo-doc{height:90px;width:auto}
 @media (prefers-color-scheme:dark){.logo-lg,.logo-sm{background:#fff;border-radius:8px;padding:2px 6px}}
+
+main a{color:var(--brand)}
+.sheet a{color:inherit}
