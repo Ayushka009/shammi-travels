@@ -5,11 +5,16 @@ const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const money = (n, min = 2) => `${CONFIG.CURRENCY}${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: min, maximumFractionDigits: 2 })}`;
 const fdate = (iso) => iso ? new Date(iso + 'T00:00:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }).replace(',', '') : '';
-const SECTIONS = { arrival: 'Arrival Transfers', departure: 'Departure Transfers', colombo: 'Travel within Colombo' };
-const KINDS = { airport: 'Airport pick-ups & drops', colombo: 'Travel within Colombo' };
-const KIND_SECTIONS = { airport: ['arrival', 'departure'], colombo: ['colombo'] };
+const SECTIONS = { arrival: 'Arrival Transfers', departure: 'Departure Transfers', colombo: 'Traveling' };
+// internal key 'colombo' kept so older saved documents still open; it is shown as "Traveling".
+const KINDS = { airport: 'Airport pick-ups & drops', colombo: 'Traveling', both: 'Airport pick-ups & drops and Traveling' };
+const KIND_SECTIONS = { airport: ['arrival', 'departure'], colombo: ['colombo'], both: ['arrival', 'departure', 'colombo'] };
 const VEHICLES = ['Car (Prius/Axio)', 'Van 9 Seater', 'Van 14 Seater', 'Bus 37 Seater Luxury Coach', 'Bus 45 Seater Coach'];
-const kindOf = (d) => d.data?.kind || ((d.items || []).some((i) => i.section === 'colombo') ? 'colombo' : 'airport');
+const kindOf = (d) => {
+  if (d.data?.kind) return d.data.kind;
+  const s = new Set((d.items || []).map((i) => i.section === 'colombo' ? 'c' : 'a'));
+  return s.has('c') && s.has('a') ? 'both' : s.has('c') ? 'colombo' : 'airport';
+};
 const vehicleSelect = (attrs, cur) => `<select ${attrs}><option value="">Select…</option>${(VEHICLES.includes(cur) || !cur ? VEHICLES : [cur, ...VEHICLES]).map((o) => `<option ${o === cur ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
 const newItem = (section = 'arrival') => ({ section, flight: '', airline: '', pickup: '', dropoff: '', date: '', time: '', guests: 1, vehicle: '', rate: 0 });
 const today = () => new Date().toLocaleDateString('en-CA');
@@ -51,14 +56,14 @@ async function loadSettings() {
 
 async function route() {
   if (!sb) return;
-  const [page = 'dashboard', a, b, c] = location.hash.replace(/^#\//, '').split('/');
+  const [page = 'dashboard', a, b, c, e5] = location.hash.replace(/^#\//, '').split('/');
   document.querySelectorAll('nav a').forEach((l) => l.classList.toggle('on', l.getAttribute('href') === `#/${page === 'customer' ? 'customers' : page}${page === 'list' ? '/' + a : ''}`));
   const v = $('#view');
   v.innerHTML = '<p class="muted">Loading…</p>';
   try {
     await loadSettings();
     const fn = { dashboard, customers, customer, list, edit, view, settings }[page] || dashboard;
-    await fn(v, a, b, c);
+    await fn(v, a, b, c, e5);
   } catch (e) { v.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
 window.addEventListener('hashchange', route);
@@ -172,12 +177,18 @@ async function nextInsert(row) {
   throw new Error('Could not allocate a document number');
 }
 
-async function edit(v, type, id, cid) {
+async function edit(v, type, id, cid, qid) {
   if (id === '-') id = undefined; // '-' = new document (lets the 4th segment carry a customer id)
+  const UUID = /^[0-9a-f-]{36}$/;
   const [custs, existing] = await Promise.all([
     q(sb.from('customers').select('id,name').order('name')),
     id ? q(sb.from('documents').select('*').eq('id', id).single()) : null,
   ]);
+  // agreements are built from accepted quotations (plus the one already linked / passed in the URL)
+  const linkIds = [existing?.data?.quotation_id, qid].filter((x) => x && UUID.test(x));
+  const quotes = type === 'agreement' || existing?.type === 'agreement'
+    ? await q(sb.from('documents').select('id,number,customer_id,total,items,data,status').eq('type', 'quotation').or(['status.eq.accepted', ...linkIds.map((x) => `id.eq.${x}`)].join(',')))
+    : [];
   const d = existing || { type, customer_id: cid, status: 'draft', issue_date: today(), items: [newItem()], tax_rate: 0, data: { terms: CONFIG.DEFAULT_TERMS }, notes: '' };
   type = d.type;
   const f = d.data || {};
@@ -193,8 +204,9 @@ async function edit(v, type, id, cid) {
       ${type === 'agreement' ? '' : `<label>${type === 'invoice' ? 'Due date' : 'Valid until'} <input name="due_date" type="date" value="${esc(d.due_date)}"></label>`}
       <label>Status <select name="status">${STATUS[type].map((s) => `<option ${s === d.status ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
     </div>
-    ${agr ? `<div class="grid">${field('company', 'Client company (if any)')}${field('service', 'Service (e.g. airport transfer, tour)')}<label>Vehicle${vehicleSelect('name="vehicle"', f.vehicle)}</label>${field('pickup', 'Pick-up location')}${field('dropoff', 'Drop-off location')}${field('start', 'Start date/time', 'datetime-local')}${field('end', 'End date/time', 'datetime-local')}
-      <label>Agreed rate (${CONFIG.CURRENCY})<input name="rate" type="number" min="0" step="0.01" value="${esc(d.total)}"></label>${field('deposit', 'Deposit')}</div>
+    ${agr ? `<label>Based on accepted quotation <select name="quotation_id" id="qsel"></select></label>
+      <div class="grid">${field('company', 'Client company (if any)')}${field('service', 'Service (e.g. airport transfer, tour)')}<label>Vehicle${vehicleSelect('name="vehicle"', f.vehicle)}</label>${field('pickup', 'Pick-up location')}${field('dropoff', 'Drop-off location')}${field('start', 'Start date/time', 'datetime-local')}${field('end', 'End date/time', 'datetime-local')}
+      <label>Agreed total (${CONFIG.CURRENCY})<input name="rate" id="rate" type="number" min="0" step="0.01" value="${esc(d.total)}"></label>${field('deposit', 'Deposit')}</div>
       <label>Terms & conditions<textarea name="terms" rows="14">${esc(f.terms)}</textarea></label>`
     : `<h3>Items</h3><div id="items"></div><button type="button" id="add">+ Add line</button>
       <p id="totals" class="num"></p>`}
@@ -210,8 +222,8 @@ async function edit(v, type, id, cid) {
   const paint = () => {
     const inp = (i, k, label, t = 'text', extra = '') => `<label>${label}<input data-i="${i}" data-k="${k}" type="${t}" ${extra} value="${esc(items[i][k])}"></label>`;
     $('#items').innerHTML = items.map((it, i) => `<div class="item">
-      ${kind === 'airport' ? `<label>Type<select data-i="${i}" data-k="section">${KIND_SECTIONS.airport.map((k) => `<option value="${k}" ${k === it.section ? 'selected' : ''}>${SECTIONS[k]}</option>`).join('')}</select></label>
-      ${inp(i, 'flight', 'Flight')}${inp(i, 'airline', 'Airline')}` : `${inp(i, 'pickup', 'Pick-up')}${inp(i, 'dropoff', 'Drop-off')}`}
+      ${KIND_SECTIONS[kind].length > 1 ? `<label>Type<select data-i="${i}" data-k="section">${KIND_SECTIONS[kind].map((k) => `<option value="${k}" ${k === it.section ? 'selected' : ''}>${SECTIONS[k]}</option>`).join('')}</select></label>` : ''}
+      ${it.section === 'colombo' ? `${inp(i, 'pickup', 'Pick-up')}${inp(i, 'dropoff', 'Drop-off')}` : `${inp(i, 'flight', 'Flight')}${inp(i, 'airline', 'Airline')}`}
       ${inp(i, 'date', 'Date', 'date')}${inp(i, 'time', 'Time', 'time')}${inp(i, 'guests', 'Guests', 'number', 'min="0"')}
       <label>Vehicle${vehicleSelect(`data-i="${i}" data-k="vehicle"`, it.vehicle)}</label>${inp(i, 'rate', 'Rate', 'number', 'min="0" step="0.01"')}
       <button type="button" class="danger" data-rm="${i}" aria-label="Remove line">✕</button></div>`).join('');
@@ -224,13 +236,27 @@ async function edit(v, type, id, cid) {
     $('#add').onclick = () => { items.push(newItem(items.at(-1)?.section || KIND_SECTIONS[kind][0])); paint(); };
     document.querySelector('[name=kind]').onchange = (e) => { kind = e.target.value; fit(); paint(); };
   }
+  if (agr) {
+    const cust = document.querySelector('[name=customer_id]'), qsel = $('#qsel'), rate = $('#rate');
+    const fillQ = (sel) => {
+      const mine = quotes.filter((x) => x.customer_id === cust.value);
+      qsel.innerHTML = `<option value="">None (enter total manually)</option>${mine.map((x) => `<option value="${x.id}" ${x.id === sel ? 'selected' : ''}>${esc(x.number)} · ${money(x.total)}${x.status === 'accepted' ? '' : ' (' + x.status + ')'}</option>`).join('')}`;
+      sync();
+    };
+    const sync = () => { const x = quotes.find((y) => y.id === qsel.value); rate.readOnly = !!x; if (x) rate.value = x.total; };
+    cust.onchange = () => fillQ('');
+    qsel.onchange = sync;
+    fillQ(f.quotation_id || qid || '');
+  }
   $('#ef').onsubmit = async (e) => {
     e.preventDefault();
     const fd = Object.fromEntries(new FormData(e.target));
     const row = { type, customer_id: fd.customer_id, issue_date: fd.issue_date, due_date: fd.due_date || null, status: fd.status, notes: fd.notes };
     if (agr) {
-      row.items = []; row.tax_rate = 0; row.total = +fd.rate || 0;
+      const qt = quotes.find((x) => x.id === fd.quotation_id && x.customer_id === fd.customer_id);
+      row.items = qt ? qt.items : []; row.tax_rate = 0; row.total = qt ? qt.total : (+fd.rate || 0); // total always equals the quotation's
       row.data = Object.fromEntries(['company', 'service', 'vehicle', 'pickup', 'dropoff', 'start', 'end', 'deposit', 'terms'].map((k) => [k, fd[k] || '']));
+      if (qt) Object.assign(row.data, { kind: kindOf(qt), quotation: qt.number, quotation_id: qt.id });
     } else {
       const clean = items.filter((i) => (i.flight || i.pickup || '').trim() || +i.rate);
       if (!clean.length) return alert('Add at least one line.');
@@ -262,8 +288,9 @@ async function view(v, id) {
     <div class="auto"><b>For the Transport Company</b><br>Authorized Signatory: ${esc(B.signatory || 'Ayushka Weerasinghe')}<br>Date: ${esc(fdate(d.issue_date))}</div></div>`;
   const bank = bankLines.length ? `<h4>Bank Details</h4>${bankLines.map((l) => `<p class="b">${esc(l)}</p>`).join('')}` : '';
   const body = d.type === 'agreement' ? `
-    ${[f.service, f.vehicle, f.pickup, f.dropoff, f.start, f.end, f.deposit].some(Boolean) || d.total ? `<table><tbody>${[['Service', f.service], ['Vehicle', f.vehicle], ['Pick-up', f.pickup], ['Drop-off', f.dropoff], ['Start', f.start], ['End', f.end], ['Agreed rate', d.total ? money(d.total) : ''], ['Deposit', f.deposit]]
+    ${[f.quotation, f.service, f.vehicle, f.pickup, f.dropoff, f.start, f.end, f.deposit].some(Boolean) || (d.total && !d.items.length) ? `<table><tbody>${[['Quotation', f.quotation], ['Service', f.service], ['Vehicle', f.vehicle], ['Pick-up', f.pickup], ['Drop-off', f.dropoff], ['Start', f.start], ['End', f.end], ['Agreed total', d.total && !d.items.length ? money(d.total) : ''], ['Deposit', f.deposit]]
       .filter(([, x]) => x).map(([k, x]) => `<tr><th>${k}</th><td>${esc(x)}</td></tr>`).join('')}</tbody></table>` : ''}
+    ${d.items.length ? `${['arrival', 'departure', 'colombo'].map(section).join('')}<div class="totalbar"><span>AGREED TOTAL</span><span>${money(d.total, 0)}</span></div>` : ''}
     <h3 class="sec">TERMS &amp; CONDITIONS</h3>${termsHtml(f.terms)}${bank}${signBlock}`
   : `${['arrival', 'departure', 'colombo'].map(section).join('')}
       <div class="totalbar"><span>TOTAL</span><span>${money(d.total, 0)}</span></div>
@@ -273,7 +300,7 @@ async function view(v, id) {
       <button class="primary" id="print">Print / Save PDF</button>
       <a href="#/edit/${d.type}/${d.id}"><button>Edit</button></a>
       <a href="#/customer/${d.customer_id}"><button>Customer</button></a>
-      ${d.type === 'quotation' ? '<button id="conv">Convert to invoice</button>' : ''}
+      ${d.type === 'quotation' ? `<button id="conv">Convert to invoice</button> <a href="#/edit/agreement/-/${d.customer_id}/${d.id}"><button>Create agreement</button></a>` : ''}
       <button class="danger" id="del">Delete</button></span>
       <label style="margin:0">Status <select id="st">${STATUS[d.type].map((s) => `<option ${s === d.status ? 'selected' : ''}>${s}</option>`).join('')}</select></label></div>
     <div class="sheet">
