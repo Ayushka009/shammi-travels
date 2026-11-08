@@ -5,8 +5,13 @@ const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const money = (n, min = 2) => `${CONFIG.CURRENCY}${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: min, maximumFractionDigits: 2 })}`;
 const fdate = (iso) => iso ? new Date(iso + 'T00:00:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }).replace(',', '') : '';
-const SECTIONS = { arrival: 'Arrival Transfers', departure: 'Departure Transfers', other: 'Other Services' };
-const newItem = (section = 'arrival') => ({ section, flight: '', airline: '', date: '', time: '', guests: 1, vehicle: '', rate: 0 });
+const SECTIONS = { arrival: 'Arrival Transfers', departure: 'Departure Transfers', colombo: 'Travel within Colombo' };
+const KINDS = { airport: 'Airport pick-ups & drops', colombo: 'Travel within Colombo' };
+const KIND_SECTIONS = { airport: ['arrival', 'departure'], colombo: ['colombo'] };
+const VEHICLES = ['Car (Prius/Axio)', 'Van 9 Seater', 'Van 14 Seater', 'Bus 37 Seater Luxury Coach', 'Bus 45 Seater Coach'];
+const kindOf = (d) => d.data?.kind || ((d.items || []).some((i) => i.section === 'colombo') ? 'colombo' : 'airport');
+const vehicleSelect = (attrs, cur) => `<select ${attrs}><option value="">Select…</option>${(VEHICLES.includes(cur) || !cur ? VEHICLES : [cur, ...VEHICLES]).map((o) => `<option ${o === cur ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+const newItem = (section = 'arrival') => ({ section, flight: '', airline: '', pickup: '', dropoff: '', date: '', time: '', guests: 1, vehicle: '', rate: 0 });
 const today = () => new Date().toLocaleDateString('en-CA');
 const ym = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 const LABEL = { invoice: 'Invoice', quotation: 'Quotation', agreement: 'Service Agreement' };
@@ -154,7 +159,7 @@ async function customers(v) {
 
 /* ---------- create / edit ---------- */
 // Rates are per vehicle/run, not per passenger (see terms), so no quantity multiplier.
-const calc = (items, rate) => { const sub = items.reduce((s, i) => s + (+i.rate || 0), 0); const tax = sub * (+rate || 0) / 100; return { sub, tax, total: sub + tax }; };
+const calc = (items) => ({ total: items.reduce((s, i) => s + (+i.rate || 0), 0) });
 
 async function nextInsert(row) {
   const { count } = await sb.from('documents').select('*', { count: 'exact', head: true }).eq('type', row.type);
@@ -184,27 +189,31 @@ async function edit(v, type, id, cid) {
     <div class="grid">
       <label>Customer <select name="customer_id" required><option value="">Select…</option>${custs.map((c) => `<option value="${c.id}" ${c.id === d.customer_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
       <label>Date <input name="issue_date" type="date" value="${esc(d.issue_date)}" required></label>
+      ${agr ? '' : `<label>${LABEL[type]} type <select name="kind">${Object.entries(KINDS).map(([k, n]) => `<option value="${k}" ${k === kindOf(d) ? 'selected' : ''}>${n}</option>`).join('')}</select></label>`}
       ${type === 'agreement' ? '' : `<label>${type === 'invoice' ? 'Due date' : 'Valid until'} <input name="due_date" type="date" value="${esc(d.due_date)}"></label>`}
       <label>Status <select name="status">${STATUS[type].map((s) => `<option ${s === d.status ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
     </div>
-    ${agr ? `<div class="grid">${field('company', 'Client company (if any)')}${field('service', 'Service (e.g. airport transfer, tour)')}${field('vehicle', 'Vehicle')}${field('pickup', 'Pick-up location')}${field('dropoff', 'Drop-off location')}${field('start', 'Start date/time', 'datetime-local')}${field('end', 'End date/time', 'datetime-local')}
+    ${agr ? `<div class="grid">${field('company', 'Client company (if any)')}${field('service', 'Service (e.g. airport transfer, tour)')}<label>Vehicle${vehicleSelect('name="vehicle"', f.vehicle)}</label>${field('pickup', 'Pick-up location')}${field('dropoff', 'Drop-off location')}${field('start', 'Start date/time', 'datetime-local')}${field('end', 'End date/time', 'datetime-local')}
       <label>Agreed rate (${CONFIG.CURRENCY})<input name="rate" type="number" min="0" step="0.01" value="${esc(d.total)}"></label>${field('deposit', 'Deposit')}</div>
       <label>Terms & conditions<textarea name="terms" rows="14">${esc(f.terms)}</textarea></label>`
     : `<h3>Items</h3><div id="items"></div><button type="button" id="add">+ Add line</button>
-      <div class="grid"><label>Tax % <input id="tax" type="number" min="0" step="0.01" value="${esc(d.tax_rate)}"></label><p id="totals" class="num"></p></div>`}
+      <p id="totals" class="num"></p>`}
     <label>Notes <textarea name="notes">${esc(d.notes)}</textarea></label>
     <button class="primary">Save</button> <a href="#/list/${type}"><button type="button">Cancel</button></a>
   </form>`;
 
   const items = d.items.length ? d.items : [newItem()];
-  const totals = () => { if (agr) return; const c = calc(items, $('#tax').value); $('#totals').innerHTML = `Subtotal ${money(c.sub)}<br>Tax ${money(c.tax)}<br><b>Total ${money(c.total)}</b>`; };
+  let kind = kindOf(d);
+  const fit = () => items.forEach((i) => { if (!KIND_SECTIONS[kind].includes(i.section)) i.section = KIND_SECTIONS[kind][0]; });
+  fit();
+  const totals = () => { if (!agr) $('#totals').innerHTML = `<b>Total ${money(calc(items).total)}</b>`; };
   const paint = () => {
     const inp = (i, k, label, t = 'text', extra = '') => `<label>${label}<input data-i="${i}" data-k="${k}" type="${t}" ${extra} value="${esc(items[i][k])}"></label>`;
     $('#items').innerHTML = items.map((it, i) => `<div class="item">
-      <label>Type<select data-i="${i}" data-k="section">${Object.entries(SECTIONS).map(([k, n]) => `<option value="${k}" ${k === it.section ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
-      ${inp(i, 'flight', it.section === 'other' ? 'Service' : 'Flight')}${inp(i, 'airline', it.section === 'other' ? 'Route / details' : 'Airline')}
+      ${kind === 'airport' ? `<label>Type<select data-i="${i}" data-k="section">${KIND_SECTIONS.airport.map((k) => `<option value="${k}" ${k === it.section ? 'selected' : ''}>${SECTIONS[k]}</option>`).join('')}</select></label>
+      ${inp(i, 'flight', 'Flight')}${inp(i, 'airline', 'Airline')}` : `${inp(i, 'pickup', 'Pick-up')}${inp(i, 'dropoff', 'Drop-off')}`}
       ${inp(i, 'date', 'Date', 'date')}${inp(i, 'time', 'Time', 'time')}${inp(i, 'guests', 'Guests', 'number', 'min="0"')}
-      ${inp(i, 'vehicle', 'Vehicle')}${inp(i, 'rate', 'Rate', 'number', 'min="0" step="0.01"')}
+      <label>Vehicle${vehicleSelect(`data-i="${i}" data-k="vehicle"`, it.vehicle)}</label>${inp(i, 'rate', 'Rate', 'number', 'min="0" step="0.01"')}
       <button type="button" class="danger" data-rm="${i}" aria-label="Remove line">✕</button></div>`).join('');
     totals();
   };
@@ -212,8 +221,8 @@ async function edit(v, type, id, cid) {
     paint();
     $('#items').oninput = (e) => { const t = e.target; if (t.dataset.i) { items[t.dataset.i][t.dataset.k] = t.value; if (t.dataset.k === 'section') paint(); else totals(); } };
     $('#items').onclick = (e) => { if (e.target.dataset.rm !== undefined) { items.splice(e.target.dataset.rm, 1); if (!items.length) items.push(newItem()); paint(); } };
-    $('#add').onclick = () => { items.push(newItem(items.at(-1)?.section)); paint(); };
-    $('#tax').oninput = totals;
+    $('#add').onclick = () => { items.push(newItem(items.at(-1)?.section || KIND_SECTIONS[kind][0])); paint(); };
+    document.querySelector('[name=kind]').onchange = (e) => { kind = e.target.value; fit(); paint(); };
   }
   $('#ef').onsubmit = async (e) => {
     e.preventDefault();
@@ -223,11 +232,12 @@ async function edit(v, type, id, cid) {
       row.items = []; row.tax_rate = 0; row.total = +fd.rate || 0;
       row.data = Object.fromEntries(['company', 'service', 'vehicle', 'pickup', 'dropoff', 'start', 'end', 'deposit', 'terms'].map((k) => [k, fd[k] || '']));
     } else {
-      const clean = items.filter((i) => i.flight.trim() || +i.rate);
+      const clean = items.filter((i) => (i.flight || i.pickup || '').trim() || +i.rate);
       if (!clean.length) return alert('Add at least one line.');
       row.items = clean.map((i) => ({ ...i, guests: +i.guests || 0, rate: +i.rate || 0 }));
-      row.tax_rate = +$('#tax').value || 0;
-      row.total = calc(row.items, row.tax_rate).total;
+      row.tax_rate = 0;
+      row.data = { ...(d.data || {}), kind };
+      row.total = calc(row.items).total;
     }
     try {
       const rid = id ? (await q(sb.from('documents').update(row).eq('id', id)), id) : await nextInsert(row);
@@ -240,24 +250,22 @@ async function edit(v, type, id, cid) {
 async function view(v, id) {
   const d = await q(sb.from('documents').select('*, customers(*)').eq('id', id).single());
   const B = S, bankLines = (S.bank || '').split('\n').filter((l) => l.trim()), c = d.customers || {}, f = d.data || {};
-  const cal = calc(d.items, d.tax_rate);
   const termsHtml = (t) => String(t || '').split('\n').filter((l) => l.trim()).map((l) => l.startsWith('# ') ? `<h4>${esc(l.slice(2))}</h4>` : `<p class="b">${esc(l)}</p>`).join('');
   const section = (key) => {
-    const rows = d.items.filter((i) => (i.section || 'other') === key);
+    const rows = d.items.filter((i) => i.section === key);
     if (!rows.length) return '';
-    const other = key === 'other';
-    return `<h3 class="sec">${SECTIONS[key].toUpperCase()}</h3><table class="rates"><thead><tr><th>${other ? 'Service' : 'Flight'}</th><th>${other ? 'Route / details' : 'Airline'}</th><th>Date</th><th>Time${other ? '' : ' (CMB)'}</th><th>Guests</th><th>Vehicle</th><th class="r">Rate</th></tr></thead><tbody>${rows.map((i) =>
-      `<tr><td>${esc(i.flight)}</td><td>${esc(i.airline)}</td><td>${esc(fdate(i.date))}</td><td>${esc(i.time)}</td><td>${esc(i.guests)}</td><td>${esc(i.vehicle)}</td><td class="r">${money(i.rate)}</td></tr>`).join('')}</tbody></table>`;
+    const cm = key === 'colombo';
+    return `<h3 class="sec">${SECTIONS[key].toUpperCase()}</h3><table class="rates"><thead><tr>${cm ? '<th>Pick-up</th><th>Drop-off</th>' : '<th>Flight</th><th>Airline</th>'}<th>Date</th><th>Time${cm ? '' : ' (CMB)'}</th><th>Guests</th><th>Vehicle</th><th class="r">Rate</th></tr></thead><tbody>${rows.map((i) =>
+      `<tr>${cm ? `<td>${esc(i.pickup)}</td><td>${esc(i.dropoff)}</td>` : `<td>${esc(i.flight)}</td><td>${esc(i.airline)}</td>`}<td>${esc(fdate(i.date))}</td><td>${esc(i.time)}</td><td>${esc(i.guests)}</td><td>${esc(i.vehicle)}</td><td class="r">${money(i.rate)}</td></tr>`).join('')}</tbody></table>`;
   };
   const signBlock = `<div class="sig"><div><b>For the Client</b><br>Name: ${esc(c.name)}<br>Company (if applicable): ${esc(f.company)}<br>Signature:<br>Date:</div>
-    <div><b>For the Transport Company</b><br>Authorized Signatory: ${esc(B.signatory)}<br>Signature:<br>Date:</div></div>`;
+    <div class="auto"><b>For the Transport Company</b><br>Authorized Signatory: ${esc(B.signatory || 'Ayushka Weerasinghe')}<br>Date: ${esc(fdate(d.issue_date))}</div></div>`;
   const bank = bankLines.length ? `<h4>Bank Details</h4>${bankLines.map((l) => `<p class="b">${esc(l)}</p>`).join('')}` : '';
   const body = d.type === 'agreement' ? `
     ${[f.service, f.vehicle, f.pickup, f.dropoff, f.start, f.end, f.deposit].some(Boolean) || d.total ? `<table><tbody>${[['Service', f.service], ['Vehicle', f.vehicle], ['Pick-up', f.pickup], ['Drop-off', f.dropoff], ['Start', f.start], ['End', f.end], ['Agreed rate', d.total ? money(d.total) : ''], ['Deposit', f.deposit]]
       .filter(([, x]) => x).map(([k, x]) => `<tr><th>${k}</th><td>${esc(x)}</td></tr>`).join('')}</tbody></table>` : ''}
     <h3 class="sec">TERMS &amp; CONDITIONS</h3>${termsHtml(f.terms)}${bank}${signBlock}`
-  : `${['arrival', 'departure', 'other'].map(section).join('')}
-      ${d.tax_rate ? `<p class="r">Subtotal ${money(cal.sub)} · Tax (${esc(d.tax_rate)}%) ${money(cal.tax)}</p>` : ''}
+  : `${['arrival', 'departure', 'colombo'].map(section).join('')}
       <div class="totalbar"><span>TOTAL</span><span>${money(d.total, 0)}</span></div>
       ${d.type === 'invoice' ? bank : '<p class="b">Rates are per vehicle/run, subject to the attached Terms &amp; Conditions and availability.</p>'}`;
 
@@ -270,7 +278,7 @@ async function view(v, id) {
       <label style="margin:0">Status <select id="st">${STATUS[d.type].map((s) => `<option ${s === d.status ? 'selected' : ''}>${s}</option>`).join('')}</select></label></div>
     <div class="sheet">
       <div class="row"><div><img src="logo.png" alt="" class="logo-doc"><br><b>${esc(B.name)}</b><br>${esc(B.address)}<br>${esc([B.phone, B.email].filter(Boolean).join(' · '))}</div>
-        <div style="text-align:right"><h2>${LABEL[d.type].toUpperCase()}</h2>${esc(d.number)}<br>Date: ${esc(d.issue_date)}${d.due_date ? `<br>${d.type === 'invoice' ? 'Due' : 'Valid until'}: ${esc(d.due_date)}` : ''}</div></div>
+        <div style="text-align:right"><h2>${LABEL[d.type].toUpperCase()}</h2>${esc(d.number)}${d.type === 'agreement' ? '' : '<br>' + esc(KINDS[kindOf(d)])}<br>Date: ${esc(d.issue_date)}${d.due_date ? `<br>${d.type === 'invoice' ? 'Due' : 'Valid until'}: ${esc(d.due_date)}` : ''}</div></div>
       <p><b>${d.type === 'agreement' ? 'Client' : 'Bill to'}:</b><br>${esc(c.name)}<br>${esc(c.address)}<br>${esc(c.phone)} ${esc(c.email)}</p>
       ${body}${d.notes ? `<p><b>Notes:</b> ${esc(d.notes)}</p>` : ''}</div>`;
   $('#print').onclick = () => print();

@@ -71,3 +71,4 @@ th,td{padding:8px;border-bottom:1px solid var(--line);text-align:left;vertical-a
 
 main a{color:var(--brand)}
 .sheet a{color:inherit}
+.sig .auto{border-top:0}
