@@ -81,3 +81,6 @@ main a{color:var(--brand)}
 .sheet table.tc th,.sheet table.tc td{border:1px solid #bbb;padding:6px;text-align:left;vertical-align:top}
 .sheet table.tc th{background:#e6e6e6}
 .sig div{border-top:0}
+.neg{color:var(--danger)}
+.sec2{margin:18px 0 6px}
+td input.cost{width:130px;margin:0;text-align:right}

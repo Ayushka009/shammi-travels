@@ -3,7 +3,7 @@ import { CONFIG } from './config.js';
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const money = (n, min = 2) => `${CONFIG.CURRENCY}${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: min, maximumFractionDigits: 2 })}`;
+const money = (n, min = 2) => `${n < 0 ? '-' : ''}${CONFIG.CURRENCY}${Math.abs(Number(n || 0)).toLocaleString('en-US', { minimumFractionDigits: min, maximumFractionDigits: 2 })}`;
 const fdate = (iso) => iso ? new Date(iso + 'T00:00:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }).replace(',', '') : '';
 const ldate = (iso, sep = ' ') => iso ? new Date(iso + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }).replace(/ /g, sep) : '';
 const SECTIONS = { arrival: 'Arrival Transfers', departure: 'Departure Transfers', colombo: 'Traveling' };
@@ -79,7 +79,7 @@ async function route() {
   v.innerHTML = '<p class="muted">Loading…</p>';
   try {
     await loadSettings();
-    const fn = { dashboard, customers, customer, list, edit, view, settings }[page] || dashboard;
+    const fn = { dashboard, customers, customer, list, edit, view, settings, profit }[page] || dashboard;
     await fn(v, a, b, c, e5);
   } catch (e) { v.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
@@ -139,6 +139,104 @@ async function settings(v) {
       S = { ...S, ...row };
       $('#ok').textContent = 'Saved.';
     } catch (err) { alert(err.message); }
+  };
+}
+
+/* ---------- cost vs profit (per quotation line; cost is stored on the line as `cost`) ---------- */
+const itemCost = (i) => (i.cost === undefined || i.cost === null || i.cost === '') ? null : +i.cost;
+const pct = (n) => n === null ? '—' : `${n.toFixed(1)}%`;
+const profitOf = (items) => {
+  const costed = items.filter((i) => itemCost(i) !== null);
+  const cost = costed.reduce((s, i) => s + itemCost(i), 0);
+  const rev = costed.reduce((s, i) => s + (+i.rate || 0), 0); // revenue of the lines that have a cost
+  return { n: costed.length, total: items.length, cost, rev, profit: rev - cost, margin: rev ? (rev - cost) / rev * 100 : null };
+};
+
+async function profit(v, id) {
+  if (id) return profitDetail(v, id);
+  const rows = await q(sb.from('documents').select('id,number,status,total,issue_date,customer_id,items,customers(name)').eq('type', 'quotation').order('created_at', { ascending: false }));
+  const calc = rows.map((d) => ({ d, p: profitOf(d.items) }));
+  const live = calc.filter((x) => x.p.n > 0 && x.d.status !== 'rejected');
+  const T = live.reduce((a, x) => ({ cost: a.cost + x.p.cost, rev: a.rev + x.p.rev }), { cost: 0, rev: 0 });
+  const prof = T.rev - T.cost;
+  v.innerHTML = `<h2>Cost vs Profit</h2>
+    <div class="grid">
+      <div class="card stat"><span class="muted">Revenue</span><b>${money(T.rev)}</b>lines with a cost</div>
+      <div class="card stat"><span class="muted">Cost</span><b>${money(T.cost)}</b>${live.length} quotations</div>
+      <div class="card stat"><span class="muted">Profit</span><b class="${prof < 0 ? 'neg' : ''}">${money(prof)}</b></div>
+      <div class="card stat"><span class="muted">Margin</span><b>${pct(T.rev ? prof / T.rev * 100 : null)}</b></div>
+    </div>
+    <div class="card"><p class="muted">Open a quotation to enter what each line costs you. Profit = quotation rate − cost.</p>
+    ${rows.length ? `<div class="tablewrap"><table><thead><tr><th>Quotation</th><th>Customer</th><th>Status</th><th class="num">Revenue</th><th class="num">Cost</th><th class="num">Profit</th><th class="num">Margin</th></tr></thead><tbody>${calc.map(({ d, p }) =>
+      `<tr><td><a href="#/profit/${d.id}">${esc(d.number)}</a></td><td>${esc(d.customers?.name)}</td><td>${esc(d.status)}</td><td class="num">${money(d.total)}</td>
+       <td class="num">${p.n ? money(p.cost) : '—'}${p.n && p.n < p.total ? `<br><span class="muted">${p.n}/${p.total} lines</span>` : ''}</td>
+       <td class="num ${p.profit < 0 ? 'neg' : ''}">${p.n ? money(p.profit) : '—'}</td><td class="num">${pct(p.margin)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">No quotations yet.</p>'}</div>`;
+}
+
+async function profitDetail(v, id) {
+  const d = await q(sb.from('documents').select('*, customers(name)').eq('id', id).eq('type', 'quotation').single());
+  const items = d.items;
+  const cell = (k, t = '') => `<td${t}>${k}</td>`;
+  const section = (key) => {
+    const idx = items.map((it, i) => i).filter((i) => items[i].section === key);
+    if (!idx.length) return '';
+    const cm = key === 'colombo';
+    const head = cm ? '<th>Date</th><th>Activity</th>' : '<th>Flight</th><th>Airline</th><th>Date</th>';
+    const first = (s) => String(s || '').split('\n')[0];
+    return `<h3 class="sec2">${SECTIONS[key]}</h3><div class="tablewrap"><table><thead><tr>${head}<th>Guests</th><th>Vehicle</th><th class="num">Rate</th><th class="num">Cost</th><th class="num">Profit</th><th class="num">Margin</th></tr></thead><tbody>${idx.map((i) => {
+      const it = items[i], c = itemCost(it);
+      const lead = cm ? `${cell(esc(fdate(it.date)))}${cell(esc(first(it.activity || [it.pickup, it.dropoff].filter(Boolean).join(' → '))), ` title="${esc(it.activity)}"`)}` : `${cell(esc(it.flight))}${cell(esc(it.airline))}${cell(esc(fdate(it.date)))}`;
+      return `<tr>${lead}${cell(esc(it.guests))}${cell(esc(it.vehicle))}<td class="num">${money(it.rate)}</td>
+        <td class="num"><input class="cost" data-cost="${i}" inputmode="decimal" autocomplete="off" placeholder="0.00" maxlength="15" aria-label="Cost for line ${i + 1}" value="${c === null ? '' : esc(fmtNum(c))}"></td>
+        <td class="num" data-p="${i}">—</td><td class="num" data-m="${i}">—</td></tr>`;
+    }).join('')}</tbody></table></div>`;
+  };
+  v.innerHTML = `<div class="row"><h2>Cost vs Profit · ${esc(d.number)}</h2><span><a href="#/view/${d.id}"><button>View quotation</button></a> <a href="#/profit"><button>All quotations</button></a></span></div>
+    <p class="muted">${esc(d.customers?.name)} · ${esc(KINDS[kindOf(d)])} · status ${esc(d.status)}</p>
+    <div class="grid">
+      <div class="card stat"><span class="muted">Revenue</span><b id="sRev"></b></div>
+      <div class="card stat"><span class="muted">Cost</span><b id="sCost"></b></div>
+      <div class="card stat"><span class="muted">Profit</span><b id="sProfit"></b></div>
+      <div class="card stat"><span class="muted">Margin</span><b id="sMargin"></b></div>
+    </div>
+    <p class="muted" id="sNote"></p>
+    <div class="card">${['arrival', 'departure', 'colombo'].map(section).join('')}
+      <p id="perr" class="err" role="alert"></p>
+      <button class="primary" id="psave">Save costs</button> <span id="pok" class="muted" role="status"></span></div>`;
+
+  const rate = (i) => +items[i].rate || 0;
+  const recalc = () => {
+    let rev = 0, revC = 0, cost = 0, n = 0;
+    items.forEach((_, i) => {
+      rev += rate(i);
+      const raw = v.querySelector(`[data-cost="${i}"]`).value.trim();
+      const pc = v.querySelector(`[data-p="${i}"]`), mc = v.querySelector(`[data-m="${i}"]`);
+      if (raw === '') { pc.textContent = mc.textContent = '—'; pc.className = mc.className = 'num'; return; }
+      const c = parseNum(raw), p = rate(i) - c;
+      n++; cost += c; revC += rate(i);
+      pc.textContent = money(p); mc.textContent = pct(rate(i) ? p / rate(i) * 100 : null);
+      pc.className = mc.className = 'num' + (p < 0 ? ' neg' : '');
+    });
+    const prof = revC - cost;
+    $('#sRev').textContent = money(rev); $('#sCost').textContent = money(cost);
+    $('#sProfit').textContent = money(prof); $('#sProfit').className = prof < 0 ? 'neg' : '';
+    $('#sMargin').textContent = pct(revC ? prof / revC * 100 : null);
+    $('#sNote').textContent = `Costs entered for ${n} of ${items.length} lines. Profit and margin cover the lines that have a cost.`;
+  };
+  v.oninput = (e) => { if (e.target.dataset.cost !== undefined) { liveMoney(e.target); recalc(); $('#pok').textContent = ''; } };
+  recalc();
+  $('#psave').onclick = async () => {
+    $('#perr').textContent = ''; $('#pok').textContent = '';
+    const next = [];
+    for (let i = 0; i < items.length; i++) {
+      const el = v.querySelector(`[data-cost="${i}"]`), raw = el.value.trim(), { cost: _drop, ...rest } = items[i];
+      if (raw === '') { next.push(rest); continue; }
+      const c = parseNum(raw);
+      if (c > MAXAMT) { $('#perr').textContent = `Line ${i + 1}: the cost is too large.`; el.focus(); return; }
+      next.push({ ...rest, cost: c });
+    }
+    try { await q(sb.from('documents').update({ items: next }).eq('id', id)); items.splice(0, items.length, ...next); $('#pok').textContent = 'Saved.'; }
+    catch (err) { $('#perr').textContent = err.message; }
   };
 }
 
