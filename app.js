@@ -3,7 +3,10 @@ import { CONFIG } from './config.js';
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const money = (n) => `${CONFIG.CURRENCY} ${Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const money = (n, min = 2) => `${CONFIG.CURRENCY}${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: min, maximumFractionDigits: 2 })}`;
+const fdate = (iso) => iso ? new Date(iso + 'T00:00:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }).replace(',', '') : '';
+const SECTIONS = { arrival: 'Arrival Transfers', departure: 'Departure Transfers', other: 'Other Services' };
+const newItem = (section = 'arrival') => ({ section, flight: '', airline: '', date: '', time: '', guests: 1, vehicle: '', rate: 0 });
 const today = () => new Date().toLocaleDateString('en-CA');
 const ym = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 const LABEL = { invoice: 'Invoice', quotation: 'Quotation', agreement: 'Service Agreement' };
@@ -32,6 +35,15 @@ $('#loginForm').onsubmit = async (e) => {
 $('#logout').onclick = () => sb.auth.signOut();
 
 /* ---------- router ---------- */
+let S = { name: 'Shammi Travels', address: '', phone: '', email: '', signatory: '', bank: '' };
+let settingsLoaded = false;
+async function loadSettings() {
+  if (settingsLoaded) return;
+  const row = await q(sb.from('settings').select('*').eq('id', 1).maybeSingle());
+  if (row) S = { ...S, ...row };
+  settingsLoaded = true;
+}
+
 async function route() {
   if (!sb) return;
   const [page = 'dashboard', a, b] = location.hash.replace(/^#\//, '').split('/');
@@ -39,7 +51,8 @@ async function route() {
   const v = $('#view');
   v.innerHTML = '<p class="muted">Loading…</p>';
   try {
-    const fn = { dashboard, customers, list, edit, view }[page] || dashboard;
+    await loadSettings();
+    const fn = { dashboard, customers, list, edit, view, settings }[page] || dashboard;
     await fn(v, a, b);
   } catch (e) { v.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
@@ -83,6 +96,25 @@ async function list(v, type = 'invoice') {
   v.innerHTML = `<div class="row"><h2>${LABEL[type]}s</h2><a href="#/edit/${type}"><button class="primary">New ${LABEL[type].toLowerCase()}</button></a></div><div class="card">${table(rows)}</div>`;
 }
 
+/* ---------- settings ---------- */
+async function settings(v) {
+  const f = (k, label) => `<label>${label}<input name="${k}" value="${esc(S[k])}"></label>`;
+  v.innerHTML = `<h2>Settings</h2><form id="sf" class="card">
+    <p class="muted">Printed on invoices, quotations and agreements. Stored in your database, behind login.</p>
+    <div class="grid">${f('name', 'Business name')}${f('address', 'Address')}${f('phone', 'Phone')}${f('email', 'Email')}${f('signatory', 'Authorized signatory (agreements)')}</div>
+    <label>Bank details (one line each, e.g. “Bank: …”, “Account Number: …”)<textarea name="bank" rows="7">${esc(S.bank)}</textarea></label>
+    <button class="primary">Save settings</button> <span id="ok" class="muted" role="status"></span></form>`;
+  $('#sf').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const row = Object.fromEntries(new FormData(e.target));
+      await q(sb.from('settings').upsert({ id: 1, ...row }));
+      S = { ...S, ...row };
+      $('#ok').textContent = 'Saved.';
+    } catch (err) { alert(err.message); }
+  };
+}
+
 /* ---------- customers ---------- */
 async function customers(v) {
   const rows = await q(sb.from('customers').select('*').order('name'));
@@ -104,7 +136,8 @@ async function customers(v) {
 }
 
 /* ---------- create / edit ---------- */
-const calc = (items, rate) => { const sub = items.reduce((s, i) => s + (+i.qty || 0) * (+i.rate || 0), 0); const tax = sub * (+rate || 0) / 100; return { sub, tax, total: sub + tax }; };
+// Rates are per vehicle/run, not per passenger (see terms), so no quantity multiplier.
+const calc = (items, rate) => { const sub = items.reduce((s, i) => s + (+i.rate || 0), 0); const tax = sub * (+rate || 0) / 100; return { sub, tax, total: sub + tax }; };
 
 async function nextInsert(row) {
   const { count } = await sb.from('documents').select('*', { count: 'exact', head: true }).eq('type', row.type);
@@ -122,7 +155,7 @@ async function edit(v, type, id) {
     q(sb.from('customers').select('id,name').order('name')),
     id ? q(sb.from('documents').select('*').eq('id', id).single()) : null,
   ]);
-  const d = existing || { type, status: 'draft', issue_date: today(), items: [{ desc: '', qty: 1, rate: 0 }], tax_rate: 0, data: { terms: CONFIG.DEFAULT_TERMS }, notes: '' };
+  const d = existing || { type, status: 'draft', issue_date: today(), items: [newItem()], tax_rate: 0, data: { terms: CONFIG.DEFAULT_TERMS }, notes: '' };
   type = d.type;
   const f = d.data || {};
   const agr = type === 'agreement';
@@ -136,7 +169,7 @@ async function edit(v, type, id) {
       ${type === 'agreement' ? '' : `<label>${type === 'invoice' ? 'Due date' : 'Valid until'} <input name="due_date" type="date" value="${esc(d.due_date)}"></label>`}
       <label>Status <select name="status">${STATUS[type].map((s) => `<option ${s === d.status ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
     </div>
-    ${agr ? `<div class="grid">${field('service', 'Service (e.g. airport transfer, tour)')}${field('vehicle', 'Vehicle')}${field('pickup', 'Pick-up location')}${field('dropoff', 'Drop-off location')}${field('start', 'Start date/time', 'datetime-local')}${field('end', 'End date/time', 'datetime-local')}
+    ${agr ? `<div class="grid">${field('company', 'Client company (if any)')}${field('service', 'Service (e.g. airport transfer, tour)')}${field('vehicle', 'Vehicle')}${field('pickup', 'Pick-up location')}${field('dropoff', 'Drop-off location')}${field('start', 'Start date/time', 'datetime-local')}${field('end', 'End date/time', 'datetime-local')}
       <label>Agreed rate (${CONFIG.CURRENCY})<input name="rate" type="number" min="0" step="0.01" value="${esc(d.total)}"></label>${field('deposit', 'Deposit')}</div>
       <label>Terms & conditions<textarea name="terms" rows="14">${esc(f.terms)}</textarea></label>`
     : `<h3>Items</h3><div id="items"></div><button type="button" id="add">+ Add line</button>
@@ -145,21 +178,23 @@ async function edit(v, type, id) {
     <button class="primary">Save</button> <a href="#/list/${type}"><button type="button">Cancel</button></a>
   </form>`;
 
-  const items = d.items.length ? d.items : [{ desc: '', qty: 1, rate: 0 }];
+  const items = d.items.length ? d.items : [newItem()];
   const totals = () => { if (agr) return; const c = calc(items, $('#tax').value); $('#totals').innerHTML = `Subtotal ${money(c.sub)}<br>Tax ${money(c.tax)}<br><b>Total ${money(c.total)}</b>`; };
   const paint = () => {
+    const inp = (i, k, label, t = 'text', extra = '') => `<label>${label}<input data-i="${i}" data-k="${k}" type="${t}" ${extra} value="${esc(items[i][k])}"></label>`;
     $('#items').innerHTML = items.map((it, i) => `<div class="item">
-      <label>Description<input data-i="${i}" data-k="desc" value="${esc(it.desc)}"></label>
-      <label>Qty<input data-i="${i}" data-k="qty" type="number" min="0" step="any" value="${esc(it.qty)}"></label>
-      <label>Rate<input data-i="${i}" data-k="rate" type="number" min="0" step="0.01" value="${esc(it.rate)}"></label>
+      <label>Type<select data-i="${i}" data-k="section">${Object.entries(SECTIONS).map(([k, n]) => `<option value="${k}" ${k === it.section ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+      ${inp(i, 'flight', it.section === 'other' ? 'Service' : 'Flight')}${inp(i, 'airline', it.section === 'other' ? 'Route / details' : 'Airline')}
+      ${inp(i, 'date', 'Date', 'date')}${inp(i, 'time', 'Time', 'time')}${inp(i, 'guests', 'Guests', 'number', 'min="0"')}
+      ${inp(i, 'vehicle', 'Vehicle')}${inp(i, 'rate', 'Rate', 'number', 'min="0" step="0.01"')}
       <button type="button" class="danger" data-rm="${i}" aria-label="Remove line">✕</button></div>`).join('');
     totals();
   };
   if (!agr) {
     paint();
-    $('#items').oninput = (e) => { const t = e.target; if (t.dataset.i) { items[t.dataset.i][t.dataset.k] = t.value; totals(); } };
-    $('#items').onclick = (e) => { if (e.target.dataset.rm !== undefined) { items.splice(e.target.dataset.rm, 1); if (!items.length) items.push({ desc: '', qty: 1, rate: 0 }); paint(); } };
-    $('#add').onclick = () => { items.push({ desc: '', qty: 1, rate: 0 }); paint(); };
+    $('#items').oninput = (e) => { const t = e.target; if (t.dataset.i) { items[t.dataset.i][t.dataset.k] = t.value; if (t.dataset.k === 'section') paint(); else totals(); } };
+    $('#items').onclick = (e) => { if (e.target.dataset.rm !== undefined) { items.splice(e.target.dataset.rm, 1); if (!items.length) items.push(newItem()); paint(); } };
+    $('#add').onclick = () => { items.push(newItem(items.at(-1)?.section)); paint(); };
     $('#tax').oninput = totals;
   }
   $('#ef').onsubmit = async (e) => {
@@ -168,11 +203,11 @@ async function edit(v, type, id) {
     const row = { type, customer_id: fd.customer_id, issue_date: fd.issue_date, due_date: fd.due_date || null, status: fd.status, notes: fd.notes };
     if (agr) {
       row.items = []; row.tax_rate = 0; row.total = +fd.rate || 0;
-      row.data = Object.fromEntries(['service', 'vehicle', 'pickup', 'dropoff', 'start', 'end', 'deposit', 'terms'].map((k) => [k, fd[k] || '']));
+      row.data = Object.fromEntries(['company', 'service', 'vehicle', 'pickup', 'dropoff', 'start', 'end', 'deposit', 'terms'].map((k) => [k, fd[k] || '']));
     } else {
-      const clean = items.filter((i) => i.desc.trim());
-      if (!clean.length) return alert('Add at least one item.');
-      row.items = clean.map((i) => ({ desc: i.desc, qty: +i.qty || 0, rate: +i.rate || 0 }));
+      const clean = items.filter((i) => i.flight.trim() || +i.rate);
+      if (!clean.length) return alert('Add at least one line.');
+      row.items = clean.map((i) => ({ ...i, guests: +i.guests || 0, rate: +i.rate || 0 }));
       row.tax_rate = +$('#tax').value || 0;
       row.total = calc(row.items, row.tax_rate).total;
     }
@@ -186,19 +221,27 @@ async function edit(v, type, id) {
 /* ---------- view / print ---------- */
 async function view(v, id) {
   const d = await q(sb.from('documents').select('*, customers(*)').eq('id', id).single());
-  const B = CONFIG.BUSINESS, c = d.customers || {}, f = d.data || {};
+  const B = S, bankLines = (S.bank || '').split('\n').filter((l) => l.trim()), c = d.customers || {}, f = d.data || {};
   const cal = calc(d.items, d.tax_rate);
+  const termsHtml = (t) => String(t || '').split('\n').filter((l) => l.trim()).map((l) => l.startsWith('# ') ? `<h4>${esc(l.slice(2))}</h4>` : `<p class="b">${esc(l)}</p>`).join('');
+  const section = (key) => {
+    const rows = d.items.filter((i) => (i.section || 'other') === key);
+    if (!rows.length) return '';
+    const other = key === 'other';
+    return `<h3 class="sec">${SECTIONS[key].toUpperCase()}</h3><table class="rates"><thead><tr><th>${other ? 'Service' : 'Flight'}</th><th>${other ? 'Route / details' : 'Airline'}</th><th>Date</th><th>Time${other ? '' : ' (CMB)'}</th><th>Guests</th><th>Vehicle</th><th class="r">Rate</th></tr></thead><tbody>${rows.map((i) =>
+      `<tr><td>${esc(i.flight)}</td><td>${esc(i.airline)}</td><td>${esc(fdate(i.date))}</td><td>${esc(i.time)}</td><td>${esc(i.guests)}</td><td>${esc(i.vehicle)}</td><td class="r">${money(i.rate)}</td></tr>`).join('')}</tbody></table>`;
+  };
+  const signBlock = `<div class="sig"><div><b>For the Client</b><br>Name: ${esc(c.name)}<br>Company (if applicable): ${esc(f.company)}<br>Signature:<br>Date:</div>
+    <div><b>For the Transport Company</b><br>Authorized Signatory: ${esc(B.signatory)}<br>Signature:<br>Date:</div></div>`;
+  const bank = bankLines.length ? `<h4>Bank Details</h4>${bankLines.map((l) => `<p class="b">${esc(l)}</p>`).join('')}` : '';
   const body = d.type === 'agreement' ? `
-    <table><tbody>${[['Service', f.service], ['Vehicle', f.vehicle], ['Pick-up', f.pickup], ['Drop-off', f.dropoff], ['Start', f.start], ['End', f.end], ['Agreed rate', d.total ? money(d.total) : ''], ['Deposit', f.deposit]]
-      .filter(([, x]) => x).map(([k, x]) => `<tr><th>${k}</th><td>${esc(x)}</td></tr>`).join('')}</tbody></table>
-    <h3>Terms &amp; conditions</h3><div class="terms">${esc(f.terms)}</div>
-    <p>By signing below, both parties agree to the terms above.</p>
-    <div class="sig"><div>For Shammi Travels<br>Name / Date</div><div>Client: ${esc(c.name)}<br>Signature / Date</div></div>`
-  : `<table><thead><tr><th>Description</th><th class="num">Qty</th><th class="num">Rate</th><th class="num">Amount</th></tr></thead><tbody>${d.items.map((i) =>
-      `<tr><td>${esc(i.desc)}</td><td class="num">${esc(i.qty)}</td><td class="num">${money(i.rate)}</td><td class="num">${money(i.qty * i.rate)}</td></tr>`).join('')}</tbody>
-      <tfoot><tr><td colspan="3" class="num">Subtotal</td><td class="num">${money(cal.sub)}</td></tr>${d.tax_rate ? `<tr><td colspan="3" class="num">Tax (${esc(d.tax_rate)}%)</td><td class="num">${money(cal.tax)}</td></tr>` : ''}
-      <tr><td colspan="3" class="num"><b>Total</b></td><td class="num"><b>${money(d.total)}</b></td></tr></tfoot></table>
-      ${d.type === 'invoice' ? `<p><b>Payment details:</b> ${esc(B.payment)}</p>` : '<p>This quotation is an estimate and is subject to availability.</p>'}`;
+    ${[f.service, f.vehicle, f.pickup, f.dropoff, f.start, f.end, f.deposit].some(Boolean) || d.total ? `<table><tbody>${[['Service', f.service], ['Vehicle', f.vehicle], ['Pick-up', f.pickup], ['Drop-off', f.dropoff], ['Start', f.start], ['End', f.end], ['Agreed rate', d.total ? money(d.total) : ''], ['Deposit', f.deposit]]
+      .filter(([, x]) => x).map(([k, x]) => `<tr><th>${k}</th><td>${esc(x)}</td></tr>`).join('')}</tbody></table>` : ''}
+    <h3 class="sec">TERMS &amp; CONDITIONS</h3>${termsHtml(f.terms)}${bank}${signBlock}`
+  : `${['arrival', 'departure', 'other'].map(section).join('')}
+      ${d.tax_rate ? `<p class="r">Subtotal ${money(cal.sub)} · Tax (${esc(d.tax_rate)}%) ${money(cal.tax)}</p>` : ''}
+      <div class="totalbar"><span>TOTAL</span><span>${money(d.total, 0)}</span></div>
+      ${d.type === 'invoice' ? bank : '<p class="b">Rates are per vehicle/run, subject to the attached Terms &amp; Conditions and availability.</p>'}`;
 
   v.innerHTML = `<div class="row noprint"><span>
       <button class="primary" id="print">Print / Save PDF</button>
@@ -207,7 +250,7 @@ async function view(v, id) {
       <button class="danger" id="del">Delete</button></span>
       <label style="margin:0">Status <select id="st">${STATUS[d.type].map((s) => `<option ${s === d.status ? 'selected' : ''}>${s}</option>`).join('')}</select></label></div>
     <div class="sheet">
-      <div class="row"><div><h2>${esc(B.name)}</h2>${esc(B.address)}<br>${esc(B.phone)} · ${esc(B.email)}</div>
+      <div class="row"><div><img src="logo.png" alt="" class="logo-doc"><br><b>${esc(B.name)}</b><br>${esc(B.address)}<br>${esc([B.phone, B.email].filter(Boolean).join(' · '))}</div>
         <div style="text-align:right"><h2>${LABEL[d.type].toUpperCase()}</h2>${esc(d.number)}<br>Date: ${esc(d.issue_date)}${d.due_date ? `<br>${d.type === 'invoice' ? 'Due' : 'Valid until'}: ${esc(d.due_date)}` : ''}</div></div>
       <p><b>${d.type === 'agreement' ? 'Client' : 'Bill to'}:</b><br>${esc(c.name)}<br>${esc(c.address)}<br>${esc(c.phone)} ${esc(c.email)}</p>
       ${body}${d.notes ? `<p><b>Notes:</b> ${esc(d.notes)}</p>` : ''}</div>`;

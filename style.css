@@ -47,3 +47,24 @@ th,td{padding:8px;border-bottom:1px solid var(--line);text-align:left;vertical-a
   main{max-width:none;padding:0}
   .sheet{border:0;padding:0}
 }
+/* reference layout: Times, grey header bar, centred cells, total bar */
+.sheet{font-family:"Times New Roman",Times,serif;font-size:15px}
+.sheet table.rates{margin-bottom:24px}
+.sheet table.rates th{background:#e6e6e6;text-align:center;border:0;padding:12px 6px}
+.sheet table.rates td{text-align:center;border:0;padding:6px}
+.sheet table.rates .r,.sheet .r{text-align:right}
+.sheet h3.sec{margin:24px 0 8px;letter-spacing:.3px}
+.sheet h4{margin:14px 0 4px}
+.sheet p.b{margin:2px 0 2px 18px;position:relative}
+.sheet p.b::before{content:"•";position:absolute;left:-14px}
+.totalbar{display:flex;justify-content:space-between;background:#e6e6e6;padding:12px 6px;font-weight:700;font-size:20px;margin:8px 0 16px}
+.item{grid-template-columns:repeat(auto-fit,minmax(110px,1fr))}
+.sheet .sig{page-break-inside:avoid}
+@media print{.sheet h4,.sheet p.b{page-break-inside:avoid}}
+.sheet{overflow-x:auto}
+@media print{.sheet{overflow:visible}}
+
+.logo-lg{display:block;width:100%;max-width:260px;margin:0 auto 8px}
+.logo-sm{height:40px;width:auto}
+.logo-doc{height:90px;width:auto}
+@media (prefers-color-scheme:dark){.logo-lg,.logo-sm{background:#fff;border-radius:8px;padding:2px 6px}}

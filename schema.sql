@@ -24,7 +24,16 @@ create table documents (
 
 -- Only signed-in users can touch anything. Disable public sign-ups in
 -- Authentication → Providers → Email so only users you create can sign in.
+create table settings (   -- single row: business details printed on documents
+  id int primary key default 1 check (id = 1),
+  name text, address text, phone text, email text, signatory text,
+  bank text                -- one line per row, printed on invoices/agreements
+);
+insert into settings (id, name) values (1, 'Shammi Travels');
+
+alter table settings enable row level security;
 alter table customers enable row level security;
 alter table documents enable row level security;
+create policy "auth only" on settings for all to authenticated using (true) with check (true);
 create policy "auth only" on customers for all to authenticated using (true) with check (true);
 create policy "auth only" on documents for all to authenticated using (true) with check (true);
