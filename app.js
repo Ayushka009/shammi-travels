@@ -16,7 +16,7 @@ const kindOf = (d) => {
   return s.has('c') && s.has('a') ? 'both' : s.has('c') ? 'colombo' : 'airport';
 };
 const vehicleSelect = (attrs, cur) => `<select ${attrs}><option value="">Select…</option>${(VEHICLES.includes(cur) || !cur ? VEHICLES : [cur, ...VEHICLES]).map((o) => `<option ${o === cur ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
-const newItem = (section = 'arrival') => ({ section, flight: '', airline: '', pickup: '', dropoff: '', date: '', time: '', guests: 1, vehicle: '', rate: 0 });
+const newItem = (section = 'arrival') => ({ section, flight: '', airline: '', activity: '', comments: '', pickup: '', dropoff: '', date: '', time: '', guests: 1, vehicle: '', rate: 0 });
 const today = () => new Date().toLocaleDateString('en-CA');
 const ym = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 const LABEL = { invoice: 'Invoice', quotation: 'Quotation', agreement: 'Service Agreement' };
@@ -221,11 +221,13 @@ async function edit(v, type, id, cid, qid) {
   const totals = () => { if (!agr) $('#totals').innerHTML = `<b>Total ${money(calc(items).total)}</b>`; };
   const paint = () => {
     const inp = (i, k, label, t = 'text', extra = '') => `<label>${label}<input data-i="${i}" data-k="${k}" type="${t}" ${extra} value="${esc(items[i][k])}"></label>`;
-    $('#items').innerHTML = items.map((it, i) => `<div class="item">
-      ${KIND_SECTIONS[kind].length > 1 ? `<label>Type<select data-i="${i}" data-k="section">${KIND_SECTIONS[kind].map((k) => `<option value="${k}" ${k === it.section ? 'selected' : ''}>${SECTIONS[k]}</option>`).join('')}</select></label>` : ''}
-      ${it.section === 'colombo' ? `${inp(i, 'pickup', 'Pick-up')}${inp(i, 'dropoff', 'Drop-off')}` : `${inp(i, 'flight', 'Flight')}${inp(i, 'airline', 'Airline')}`}
-      ${inp(i, 'date', 'Date', 'date')}${inp(i, 'time', 'Time', 'time')}${inp(i, 'guests', 'Guests', 'number', 'min="0"')}
-      <label>Vehicle${vehicleSelect(`data-i="${i}" data-k="vehicle"`, it.vehicle)}</label>${inp(i, 'rate', 'Rate', 'number', 'min="0" step="0.01"')}
+    const veh = (i, it) => `<label>Vehicle${vehicleSelect(`data-i="${i}" data-k="vehicle"`, it.vehicle)}</label>`;
+    const typeSel = (i, it) => KIND_SECTIONS[kind].length > 1 ? `<label>Type<select data-i="${i}" data-k="section">${KIND_SECTIONS[kind].map((k) => `<option value="${k}" ${k === it.section ? 'selected' : ''}>${SECTIONS[k]}</option>`).join('')}</select></label>` : '';
+    $('#items').innerHTML = items.map((it, i) => `<div class="item">${typeSel(i, it)}${it.section === 'colombo'
+      ? `${inp(i, 'date', 'Date', 'date')}${inp(i, 'time', 'Time (e.g. 9:00am)')}${inp(i, 'guests', 'Guests', 'number', 'min="0"')}${veh(i, it)}${inp(i, 'rate', 'Rate', 'number', 'min="0" step="0.01"')}
+      <label class="wide">Activity (one per line)<textarea data-i="${i}" data-k="activity" rows="3">${esc(it.activity || [it.pickup, it.dropoff].filter(Boolean).join(' → '))}</textarea></label>
+      <label class="wide">Comments / extra charges<input data-i="${i}" data-k="comments" value="${esc(it.comments)}"></label>`
+      : `${inp(i, 'flight', 'Flight')}${inp(i, 'airline', 'Airline')}${inp(i, 'date', 'Date', 'date')}${inp(i, 'time', 'Time', 'time')}${inp(i, 'guests', 'Guests', 'number', 'min="0"')}${veh(i, it)}${inp(i, 'rate', 'Rate', 'number', 'min="0" step="0.01"')}`}
       <button type="button" class="danger" data-rm="${i}" aria-label="Remove line">✕</button></div>`).join('');
     totals();
   };
@@ -258,7 +260,7 @@ async function edit(v, type, id, cid, qid) {
       row.data = Object.fromEntries(['company', 'service', 'vehicle', 'pickup', 'dropoff', 'start', 'end', 'deposit', 'terms'].map((k) => [k, fd[k] || '']));
       if (qt) Object.assign(row.data, { kind: kindOf(qt), quotation: qt.number, quotation_id: qt.id });
     } else {
-      const clean = items.filter((i) => (i.flight || i.pickup || '').trim() || +i.rate);
+      const clean = items.filter((i) => (i.flight || i.activity || i.pickup || '').trim() || +i.rate);
       if (!clean.length) return alert('Add at least one line.');
       row.items = clean.map((i) => ({ ...i, guests: +i.guests || 0, rate: +i.rate || 0 }));
       row.tax_rate = 0;
@@ -281,8 +283,11 @@ async function view(v, id) {
     const rows = d.items.filter((i) => i.section === key);
     if (!rows.length) return '';
     const cm = key === 'colombo';
-    return `<h3 class="sec">${SECTIONS[key].toUpperCase()}</h3><table class="rates"><thead><tr>${cm ? '<th>Pick-up</th><th>Drop-off</th>' : '<th>Flight</th><th>Airline</th>'}<th>Date</th><th>Time${cm ? '' : ' (CMB)'}</th><th>Guests</th><th>Vehicle</th><th class="r">Rate</th></tr></thead><tbody>${rows.map((i) =>
-      `<tr>${cm ? `<td>${esc(i.pickup)}</td><td>${esc(i.dropoff)}</td>` : `<td>${esc(i.flight)}</td><td>${esc(i.airline)}</td>`}<td>${esc(fdate(i.date))}</td><td>${esc(i.time)}</td><td>${esc(i.guests)}</td><td>${esc(i.vehicle)}</td><td class="r">${money(i.rate)}</td></tr>`).join('')}</tbody></table>`;
+    const head = cm ? '<th>Date</th><th>Time</th><th>Activity</th><th>Guests</th><th>Vehicle</th><th class="r">Rate</th><th>Comments</th>' : '<th>Flight</th><th>Airline</th><th>Date</th><th>Time (CMB)</th><th>Guests</th><th>Vehicle</th><th class="r">Rate</th>';
+    const row = (i) => cm
+      ? `<td>${esc(fdate(i.date))}</td><td>${esc(i.time)}</td><td class="act">${esc(i.activity || [i.pickup, i.dropoff].filter(Boolean).join(' → '))}</td><td>${esc(i.guests)}</td><td>${esc(i.vehicle)}</td><td class="r">${money(i.rate)}</td><td class="act">${esc(i.comments)}</td>`
+      : `<td>${esc(i.flight)}</td><td>${esc(i.airline)}</td><td>${esc(fdate(i.date))}</td><td>${esc(i.time)}</td><td>${esc(i.guests)}</td><td>${esc(i.vehicle)}</td><td class="r">${money(i.rate)}</td>`;
+    return `<h3 class="sec">${SECTIONS[key].toUpperCase()}</h3><table class="rates"><thead><tr>${head}</tr></thead><tbody>${rows.map((i) => `<tr>${row(i)}</tr>`).join('')}</tbody></table>`;
   };
   const signBlock = `<div class="sig"><div><b>For the Client</b><br>Name: ${esc(c.name)}<br>Company (if applicable): ${esc(f.company)}<br>Signature:<br>Date:</div>
     <div class="auto"><b>For the Transport Company</b><br>Authorized Signatory: ${esc(B.signatory || 'Ayushka Weerasinghe')}<br>Date: ${esc(fdate(d.issue_date))}</div></div>`;
