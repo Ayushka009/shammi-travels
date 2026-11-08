@@ -5,6 +5,7 @@ const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const money = (n, min = 2) => `${CONFIG.CURRENCY}${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: min, maximumFractionDigits: 2 })}`;
 const fdate = (iso) => iso ? new Date(iso + 'T00:00:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }).replace(',', '') : '';
+const ldate = (iso, sep = ' ') => iso ? new Date(iso + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }).replace(/ /g, sep) : '';
 const SECTIONS = { arrival: 'Arrival Transfers', departure: 'Departure Transfers', colombo: 'Traveling' };
 // internal key 'colombo' kept so older saved documents still open; it is shown as "Traveling".
 const KINDS = { airport: 'Airport pick-ups & drops', colombo: 'Traveling', both: 'Airport pick-ups & drops and Traveling' };
@@ -225,9 +226,10 @@ async function edit(v, type, id, cid, qid) {
       <label>Status <select name="status">${STATUS[type].map((s) => `<option ${s === d.status ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
     </div>
     ${agr ? `<label>Based on accepted quotation <select name="quotation_id" id="qsel"></select></label>
-      <div class="grid">${field('company', 'Client company (if any)')}${field('service', 'Service (e.g. airport transfer, tour)')}<label>Vehicle${vehicleSelect('name="vehicle"', f.vehicle)}</label>${field('pickup', 'Pick-up location')}${field('dropoff', 'Drop-off location')}${field('start', 'Start date', 'date')}${field('end', 'End date', 'date')}
+      <div class="grid">${field('company', 'Client organisation (e.g. Curtin University)')}${field('service', 'Service (e.g. airport transfer, tour)')}<label>Vehicle${vehicleSelect('name="vehicle"', f.vehicle)}</label>${field('pickup', 'Pick-up location')}${field('dropoff', 'Drop-off location')}${field('start', 'Start date', 'date')}${field('end', 'End date', 'date')}
       <label>Agreed total (${CONFIG.CURRENCY})<input name="rate" id="rate" inputmode="decimal" autocomplete="off" placeholder="0.00" maxlength="15" value="${d.total ? esc(fmtNum(d.total)) : ''}"></label>${field('deposit', 'Deposit')}</div>
-      <label>Terms & conditions<textarea name="terms" rows="14" required maxlength="20000">${esc(f.terms)}</textarea></label>`
+      <label>Terms & conditions<textarea name="terms" rows="14" required maxlength="20000">${esc(f.terms)}</textarea></label>
+      <button type="button" id="resetTerms">Load standard terms</button>`
     : `<h3>Items</h3><div id="items"></div><button type="button" id="add">+ Add line</button>
       <p id="totals" class="num"></p>`}
     <label>Notes <textarea name="notes" maxlength="1000">${esc(d.notes)}</textarea></label>
@@ -270,6 +272,7 @@ async function edit(v, type, id, cid, qid) {
     };
     const sync = () => { const x = quotes.find((y) => y.id === qsel.value); rate.readOnly = !!x; if (x) rate.value = fmtNum(x.total); };
     rate.oninput = () => liveMoney(rate);
+    $('#resetTerms').onclick = () => { if (confirm('Replace the terms below with the standard Transportation Services Agreement terms?')) document.querySelector('[name=terms]').value = CONFIG.DEFAULT_TERMS; };
     cust.onchange = () => fillQ('');
     qsel.onchange = sync;
     fillQ(f.quotation_id || qid || '');
@@ -317,7 +320,35 @@ async function edit(v, type, id, cid, qid) {
 async function view(v, id) {
   const d = await q(sb.from('documents').select('*, customers(*)').eq('id', id).single());
   const B = S, bankLines = (S.bank || '').split('\n').filter((l) => l.trim()), c = d.customers || {}, f = d.data || {};
-  const termsHtml = (t) => String(t || '').split('\n').filter((l) => l.trim()).map((l) => l.startsWith('# ') ? `<h4>${esc(l.slice(2))}</h4>` : `<p class="b">${esc(l)}</p>`).join('');
+  const bankHtml = bankLines.length ? bankLines.map((l) => `<p class="p">${esc(l)}</p>`).join('') : '<p class="p err noprint">Bank details are missing: add them in Settings.</p>';
+  const termsHtml = (t) => {
+    const lines = String(t || '').split('\n').filter((l) => l.trim());
+    const legacy = !lines.some((l) => /^(- |\d+\. |\| )/.test(l)); // older agreements: every plain line is a bullet
+    let html = '', tbl = [];
+    const flush = () => {
+      if (!tbl.length) return;
+      const [h, ...r] = tbl;
+      html += `<table class="tc"><thead><tr>${h.map((x) => `<th>${esc(x)}</th>`).join('')}</tr></thead><tbody>${r.map((row) => `<tr>${row.map((x) => `<td>${esc(x)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+      tbl = [];
+    };
+    for (const l of lines) {
+      if (l.startsWith('| ')) { tbl.push(l.slice(2).split(' | ')); continue; }
+      flush();
+      html += l.trim() === '{{bank}}' ? bankHtml
+        : l.startsWith('# ') ? `<h4>${esc(l.slice(2))}</h4>`
+        : l.startsWith('- ') ? `<p class="b">${esc(l.slice(2))}</p>`
+        : /^\d+\. /.test(l) ? `<p class="n">${esc(l)}</p>`
+        : `<p class="${legacy ? 'b' : 'p'}">${esc(l)}</p>`;
+    }
+    flush();
+    return html;
+  };
+  const client = f.company || c.name;
+  const parties = `<h3 class="sec">PARTIES</h3>
+    <p class="p">This Transportation Services Agreement (“Agreement”) is entered into on ${esc(ldate(d.issue_date))}, between:</p>
+    <p class="p"><b>Service Provider:</b> ${esc(CONFIG.PROVIDER)} (${esc(CONFIG.PROVIDER_REG)}), hereinafter referred to as the “Service Provider”.</p>
+    <p class="p"><b>Client:</b> ${esc(client)}, hereinafter referred to as the “Client”.</p>
+    <p class="p">The Service Provider and the Client shall collectively be referred to as the “Parties”.</p>`;
   const section = (key) => {
     const rows = d.items.filter((i) => i.section === key);
     if (!rows.length) return '';
@@ -328,14 +359,16 @@ async function view(v, id) {
       : `<td>${esc(i.flight)}</td><td>${esc(i.airline)}</td><td>${esc(fdate(i.date))}</td><td>${esc(i.time)}</td><td>${esc(i.guests)}</td><td>${esc(i.vehicle)}</td><td class="r">${money(i.rate)}</td>`;
     return `<h3 class="sec">${SECTIONS[key].toUpperCase()}</h3><table class="rates"><thead><tr>${head}</tr></thead><tbody>${rows.map((i) => `<tr>${row(i)}</tr>`).join('')}</tbody></table>`;
   };
-  const signBlock = `<div class="sig"><div><b>For the Client</b><br>Name: ${esc(c.name)}<br>Company (if applicable): ${esc(f.company)}<br>Signature:<br>Date:</div>
-    <div class="auto"><b>For the Transport Company</b><br>Authorized Signatory: ${esc(B.signatory || 'Ayushka Weerasinghe')}<br>Date: ${esc(fdate(d.issue_date))}</div></div>`;
+  const signBlock = `<h4>21. Signatures</h4><p class="p">By signing below, both Parties acknowledge that they have read, understood and agreed to the terms and conditions of this Agreement.</p>
+    <div class="sig"><div><b>FOR THE SERVICE PROVIDER</b><br>${esc(CONFIG.PROVIDER)}<br>Name: ${esc(B.signatory || 'Ayushka Weerasinghe')}<br>Date: ${esc(ldate(d.issue_date, '-'))}</div>
+    <div><b>FOR THE CLIENT</b><br>${esc(client)}<br>Name: ${esc(c.name)}<br>Designation: ____________________<br>Signature: ____________________<br>Date: ____________________</div></div>`;
   const bank = bankLines.length ? `<h4>Bank Details</h4>${bankLines.map((l) => `<p class="b">${esc(l)}</p>`).join('')}` : '';
   const body = d.type === 'agreement' ? `
+    ${parties}
     ${[f.quotation, f.service, f.vehicle, f.pickup, f.dropoff, f.start, f.end, f.deposit].some(Boolean) || (d.total && !d.items.length) ? `<table><tbody>${[['Quotation', f.quotation], ['Service', f.service], ['Vehicle', f.vehicle], ['Pick-up', f.pickup], ['Drop-off', f.dropoff], ['Start', f.start ? fdate(String(f.start).slice(0, 10)) : ''], ['End', f.end ? fdate(String(f.end).slice(0, 10)) : ''], ['Agreed total', d.total && !d.items.length ? money(d.total) : ''], ['Deposit', f.deposit]]
       .filter(([, x]) => x).map(([k, x]) => `<tr><th>${k}</th><td>${esc(x)}</td></tr>`).join('')}</tbody></table>` : ''}
     ${d.items.length ? `${['arrival', 'departure', 'colombo'].map(section).join('')}<div class="totalbar"><span>AGREED TOTAL</span><span>${money(d.total, 0)}</span></div>` : ''}
-    <h3 class="sec">TERMS &amp; CONDITIONS</h3>${termsHtml(f.terms)}${bank}${signBlock}`
+    ${termsHtml(f.terms)}${/\{\{bank\}\}/.test(f.terms || '') ? '' : bank}${signBlock}`
   : `${['arrival', 'departure', 'colombo'].map(section).join('')}
       <div class="totalbar"><span>TOTAL</span><span>${money(d.total, 0)}</span></div>
       ${d.type === 'invoice' ? bank : '<p class="b">Rates are per vehicle/run, subject to the attached Terms &amp; Conditions and availability.</p>'}`;
@@ -349,8 +382,8 @@ async function view(v, id) {
       <label style="margin:0">Status <select id="st">${STATUS[d.type].map((s) => `<option ${s === d.status ? 'selected' : ''}>${s}</option>`).join('')}</select></label></div>
     <div class="sheet">
       <div class="row"><div><img src="logo.png" alt="" class="logo-doc"><br><b>${esc(B.name)}</b><br>${esc(B.address)}<br>${esc([B.phone, B.email].filter(Boolean).join(' · '))}</div>
-        <div style="text-align:right"><h2>${LABEL[d.type].toUpperCase()}</h2>${esc(d.number)}${d.type === 'agreement' ? '' : '<br>' + esc(KINDS[kindOf(d)])}<br>Date: ${esc(d.issue_date)}${d.due_date ? `<br>${d.type === 'invoice' ? 'Due' : 'Valid until'}: ${esc(d.due_date)}` : ''}</div></div>
-      <p><b>${d.type === 'agreement' ? 'Client' : 'Bill to'}:</b><br>${esc(c.name)}<br>${esc(c.address)}<br>${esc(c.phone)} ${esc(c.email)}</p>
+        <div style="text-align:right"><h2>${d.type === 'agreement' ? 'TRANSPORTATION SERVICES AGREEMENT' : LABEL[d.type].toUpperCase()}</h2>${esc(d.number)}${d.type === 'agreement' ? '' : '<br>' + esc(KINDS[kindOf(d)])}<br>Date: ${esc(d.issue_date)}${d.due_date ? `<br>${d.type === 'invoice' ? 'Due' : 'Valid until'}: ${esc(d.due_date)}` : ''}</div></div>
+      ${d.type === 'agreement' ? '' : `<p><b>Bill to:</b><br>${esc(c.name)}<br>${esc(c.address)}<br>${esc(c.phone)} ${esc(c.email)}</p>`}
       ${body}${d.notes ? `<p><b>Notes:</b> ${esc(d.notes)}</p>` : ''}</div>`;
   $('#print').onclick = () => print();
   $('#st').onchange = async (e) => { try { await q(sb.from('documents').update({ status: e.target.value }).eq('id', id)); } catch (err) { alert(err.message); } };

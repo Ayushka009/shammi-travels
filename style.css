@@ -75,3 +75,9 @@ main a{color:var(--brand)}
 .wide{grid-column:1/-1}
 .sheet td.act{text-align:left;white-space:pre-line;font-size:13px}
 .sheet table.rates td.act{text-align:left;white-space:pre-line;font-size:13px}
+.sheet p.p{margin:4px 0}
+.sheet p.n{margin:4px 0 4px 18px}
+.sheet table.tc{width:100%;border-collapse:collapse;margin:8px 0}
+.sheet table.tc th,.sheet table.tc td{border:1px solid #bbb;padding:6px;text-align:left;vertical-align:top}
+.sheet table.tc th{background:#e6e6e6}
+.sig div{border-top:0}
