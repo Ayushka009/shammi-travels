@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Shammi Travels</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<section id="login" hidden>
+  <form id="loginForm" class="card">
+    <h1>Shammi Travels</h1>
+    <p class="muted">Sign in to continue</p>
+    <label>Email <input id="email" type="email" autocomplete="username" required></label>
+    <label>Password <input id="password" type="password" autocomplete="current-password" required></label>
+    <p id="loginErr" class="err" role="alert"></p>
+    <button class="primary">Sign in</button>
+  </form>
+</section>
+
+<div id="app" hidden>
+  <header class="noprint">
+    <strong>Shammi Travels</strong>
+    <nav>
+      <a href="#/dashboard">Dashboard</a>
+      <a href="#/list/invoice">Invoices</a>
+      <a href="#/list/quotation">Quotations</a>
+      <a href="#/list/agreement">Agreements</a>
+      <a href="#/customers">Customers</a>
+    </nav>
+    <button id="logout" class="ghost">Sign out</button>
+  </header>
+  <main id="view"></main>
+</div>
+<script type="module" src="app.js"></script>
+</body>
+</html>

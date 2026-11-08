@@ -1,0 +1,229 @@
+import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
+import { CONFIG } from './config.js';
+
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const money = (n) => `${CONFIG.CURRENCY} ${Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const today = () => new Date().toLocaleDateString('en-CA');
+const ym = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+const LABEL = { invoice: 'Invoice', quotation: 'Quotation', agreement: 'Service Agreement' };
+const PREFIX = { invoice: 'INV', quotation: 'QUO', agreement: 'AGR' };
+const STATUS = { invoice: ['draft', 'sent', 'paid', 'cancelled'], quotation: ['draft', 'sent', 'accepted', 'rejected'], agreement: ['draft', 'signed', 'cancelled'] };
+
+const configured = CONFIG.SUPABASE_URL.startsWith('https://');
+const sb = configured ? createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY) : null;
+const q = async (p) => { const { data, error } = await p; if (error) throw error; return data; };
+
+/* ---------- auth ---------- */
+function show(app) { $('#login').hidden = app; $('#app').hidden = !app; }
+async function boot() {
+  if (!configured) { show(false); $('#loginErr').textContent = 'Setup needed: add your Supabase URL and anon key in config.js (see README).'; return; }
+  const { data: { session } } = await sb.auth.getSession();
+  show(!!session);
+  if (session) route();
+  sb.auth.onAuthStateChange((ev) => { if (ev === 'SIGNED_IN') { show(true); route(); } if (ev === 'SIGNED_OUT') show(false); });
+}
+$('#loginForm').onsubmit = async (e) => {
+  e.preventDefault();
+  if (!configured) return;
+  const { error } = await sb.auth.signInWithPassword({ email: $('#email').value, password: $('#password').value });
+  $('#loginErr').textContent = error ? 'Sign in failed: check your email and password.' : '';
+};
+$('#logout').onclick = () => sb.auth.signOut();
+
+/* ---------- router ---------- */
+async function route() {
+  if (!sb) return;
+  const [page = 'dashboard', a, b] = location.hash.replace(/^#\//, '').split('/');
+  document.querySelectorAll('nav a').forEach((l) => l.classList.toggle('on', l.getAttribute('href') === `#/${page}${page === 'list' ? '/' + a : ''}`));
+  const v = $('#view');
+  v.innerHTML = '<p class="muted">Loading…</p>';
+  try {
+    const fn = { dashboard, customers, list, edit, view }[page] || dashboard;
+    await fn(v, a, b);
+  } catch (e) { v.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+}
+window.addEventListener('hashchange', route);
+
+/* ---------- dashboard ---------- */
+async function dashboard(v) {
+  const docs = await q(sb.from('documents').select('id,type,number,status,total,issue_date,customers(name)').order('created_at', { ascending: false }));
+  const inv = docs.filter((d) => d.type === 'invoice');
+  const quo = docs.filter((d) => d.type === 'quotation');
+  const sum = (a) => a.reduce((s, d) => s + Number(d.total), 0);
+  const paid = inv.filter((d) => d.status === 'paid');
+  const owed = inv.filter((d) => d.status === 'sent' || d.status === 'draft');
+  const open = quo.filter((d) => d.status === 'sent' || d.status === 'draft');
+  const months = [...Array(6)].map((_, i) => { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - 5 + i); return ym(d); });
+  const rev = months.map((m) => sum(paid.filter((d) => d.issue_date.startsWith(m))));
+  const max = Math.max(...rev, 1);
+  v.innerHTML = `
+    <h2>Dashboard</h2>
+    <div class="grid">
+      <div class="card stat"><span class="muted">Paid</span><b>${money(sum(paid))}</b>${paid.length} invoices</div>
+      <div class="card stat"><span class="muted">Outstanding</span><b>${money(sum(owed))}</b>${owed.length} invoices</div>
+      <div class="card stat"><span class="muted">Open quotations</span><b>${money(sum(open))}</b>${open.length} quotations</div>
+      <div class="card stat"><span class="muted">Agreements</span><b>${docs.filter((d) => d.type === 'agreement').length}</b>on file</div>
+    </div>
+    <div class="card"><h3>Paid revenue, last 6 months</h3>
+      <div class="bars">${rev.map((r, i) => `<div class="bar" title="${money(r)}"><i style="height:${(r / max) * 100}%"></i>${months[i].slice(2)}</div>`).join('')}</div></div>
+    <div class="card"><div class="row"><h3>Create</h3><span>
+      <a href="#/edit/invoice"><button class="primary">New invoice</button></a>
+      <a href="#/edit/quotation"><button>New quotation</button></a>
+      <a href="#/edit/agreement"><button>New agreement</button></a></span></div>
+      <h3>Recent</h3>${table(docs.slice(0, 8))}</div>`;
+}
+
+/* ---------- lists ---------- */
+const table = (rows) => rows.length ? `<div class="tablewrap"><table><thead><tr><th>No.</th><th>Customer</th><th>Date</th><th class="num">Total</th><th>Status</th></tr></thead><tbody>${rows.map((d) =>
+  `<tr><td><a href="#/view/${d.id}">${esc(d.number)}</a></td><td>${esc(d.customers?.name)}</td><td>${esc(d.issue_date)}</td><td class="num">${d.total > 0 ? money(d.total) : '-'}</td><td>${esc(d.status)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">Nothing here yet.</p>';
+
+async function list(v, type = 'invoice') {
+  const rows = await q(sb.from('documents').select('id,number,status,total,issue_date,customers(name)').eq('type', type).order('created_at', { ascending: false }));
+  v.innerHTML = `<div class="row"><h2>${LABEL[type]}s</h2><a href="#/edit/${type}"><button class="primary">New ${LABEL[type].toLowerCase()}</button></a></div><div class="card">${table(rows)}</div>`;
+}
+
+/* ---------- customers ---------- */
+async function customers(v) {
+  const rows = await q(sb.from('customers').select('*').order('name'));
+  v.innerHTML = `<h2>Customers</h2>
+    <form id="cf" class="card grid">
+      <label>Name <input name="name" required></label><label>Phone <input name="phone"></label>
+      <label>Email <input name="email" type="email"></label><label>Address <input name="address"></label>
+      <div><button class="primary">Add customer</button></div></form>
+    <div class="card tablewrap"><table><thead><tr><th>Name</th><th>Phone</th><th>Email</th><th></th></tr></thead><tbody>${rows.map((c) =>
+      `<tr><td>${esc(c.name)}<br><span class="muted">${esc(c.address)}</span></td><td>${esc(c.phone)}</td><td>${esc(c.email)}</td><td><button class="danger" data-del="${c.id}">Delete</button></td></tr>`).join('')}</tbody></table></div>`;
+  $('#cf').onsubmit = async (e) => {
+    e.preventDefault();
+    try { await q(sb.from('customers').insert(Object.fromEntries(new FormData(e.target)))); route(); } catch (err) { alert(err.message); }
+  };
+  v.querySelectorAll('[data-del]').forEach((b) => b.onclick = async () => {
+    if (!confirm('Delete this customer?')) return;
+    try { await q(sb.from('customers').delete().eq('id', b.dataset.del)); route(); } catch (err) { alert('Cannot delete: this customer has documents.'); }
+  });
+}
+
+/* ---------- create / edit ---------- */
+const calc = (items, rate) => { const sub = items.reduce((s, i) => s + (+i.qty || 0) * (+i.rate || 0), 0); const tax = sub * (+rate || 0) / 100; return { sub, tax, total: sub + tax }; };
+
+async function nextInsert(row) {
+  const { count } = await sb.from('documents').select('*', { count: 'exact', head: true }).eq('type', row.type);
+  for (let n = (count || 0) + 1, i = 0; i < 20; i++, n++) {
+    const number = `${PREFIX[row.type]}-${new Date().getFullYear()}-${String(n).padStart(4, '0')}`;
+    const r = await sb.from('documents').insert({ ...row, number }).select('id').single();
+    if (!r.error) return r.data.id;
+    if (r.error.code !== '23505') throw r.error; // 23505 = number taken, try the next one
+  }
+  throw new Error('Could not allocate a document number');
+}
+
+async function edit(v, type, id) {
+  const [custs, existing] = await Promise.all([
+    q(sb.from('customers').select('id,name').order('name')),
+    id ? q(sb.from('documents').select('*').eq('id', id).single()) : null,
+  ]);
+  const d = existing || { type, status: 'draft', issue_date: today(), items: [{ desc: '', qty: 1, rate: 0 }], tax_rate: 0, data: { terms: CONFIG.DEFAULT_TERMS }, notes: '' };
+  type = d.type;
+  const f = d.data || {};
+  const agr = type === 'agreement';
+  const field = (k, label, t = 'text') => `<label>${label}<input name="${k}" type="${t}" value="${esc(f[k])}"></label>`;
+  v.innerHTML = `<h2>${id ? 'Edit' : 'New'} ${LABEL[type].toLowerCase()}${id ? ' ' + esc(d.number) : ''}</h2>
+  <form id="ef" class="card">
+    ${custs.length ? '' : '<p class="err">Add a customer first (Customers tab).</p>'}
+    <div class="grid">
+      <label>Customer <select name="customer_id" required><option value="">Select…</option>${custs.map((c) => `<option value="${c.id}" ${c.id === d.customer_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
+      <label>Date <input name="issue_date" type="date" value="${esc(d.issue_date)}" required></label>
+      ${type === 'agreement' ? '' : `<label>${type === 'invoice' ? 'Due date' : 'Valid until'} <input name="due_date" type="date" value="${esc(d.due_date)}"></label>`}
+      <label>Status <select name="status">${STATUS[type].map((s) => `<option ${s === d.status ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
+    </div>
+    ${agr ? `<div class="grid">${field('service', 'Service (e.g. airport transfer, tour)')}${field('vehicle', 'Vehicle')}${field('pickup', 'Pick-up location')}${field('dropoff', 'Drop-off location')}${field('start', 'Start date/time', 'datetime-local')}${field('end', 'End date/time', 'datetime-local')}
+      <label>Agreed rate (${CONFIG.CURRENCY})<input name="rate" type="number" min="0" step="0.01" value="${esc(d.total)}"></label>${field('deposit', 'Deposit')}</div>
+      <label>Terms & conditions<textarea name="terms" rows="14">${esc(f.terms)}</textarea></label>`
+    : `<h3>Items</h3><div id="items"></div><button type="button" id="add">+ Add line</button>
+      <div class="grid"><label>Tax % <input id="tax" type="number" min="0" step="0.01" value="${esc(d.tax_rate)}"></label><p id="totals" class="num"></p></div>`}
+    <label>Notes <textarea name="notes">${esc(d.notes)}</textarea></label>
+    <button class="primary">Save</button> <a href="#/list/${type}"><button type="button">Cancel</button></a>
+  </form>`;
+
+  const items = d.items.length ? d.items : [{ desc: '', qty: 1, rate: 0 }];
+  const totals = () => { if (agr) return; const c = calc(items, $('#tax').value); $('#totals').innerHTML = `Subtotal ${money(c.sub)}<br>Tax ${money(c.tax)}<br><b>Total ${money(c.total)}</b>`; };
+  const paint = () => {
+    $('#items').innerHTML = items.map((it, i) => `<div class="item">
+      <label>Description<input data-i="${i}" data-k="desc" value="${esc(it.desc)}"></label>
+      <label>Qty<input data-i="${i}" data-k="qty" type="number" min="0" step="any" value="${esc(it.qty)}"></label>
+      <label>Rate<input data-i="${i}" data-k="rate" type="number" min="0" step="0.01" value="${esc(it.rate)}"></label>
+      <button type="button" class="danger" data-rm="${i}" aria-label="Remove line">✕</button></div>`).join('');
+    totals();
+  };
+  if (!agr) {
+    paint();
+    $('#items').oninput = (e) => { const t = e.target; if (t.dataset.i) { items[t.dataset.i][t.dataset.k] = t.value; totals(); } };
+    $('#items').onclick = (e) => { if (e.target.dataset.rm !== undefined) { items.splice(e.target.dataset.rm, 1); if (!items.length) items.push({ desc: '', qty: 1, rate: 0 }); paint(); } };
+    $('#add').onclick = () => { items.push({ desc: '', qty: 1, rate: 0 }); paint(); };
+    $('#tax').oninput = totals;
+  }
+  $('#ef').onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = Object.fromEntries(new FormData(e.target));
+    const row = { type, customer_id: fd.customer_id, issue_date: fd.issue_date, due_date: fd.due_date || null, status: fd.status, notes: fd.notes };
+    if (agr) {
+      row.items = []; row.tax_rate = 0; row.total = +fd.rate || 0;
+      row.data = Object.fromEntries(['service', 'vehicle', 'pickup', 'dropoff', 'start', 'end', 'deposit', 'terms'].map((k) => [k, fd[k] || '']));
+    } else {
+      const clean = items.filter((i) => i.desc.trim());
+      if (!clean.length) return alert('Add at least one item.');
+      row.items = clean.map((i) => ({ desc: i.desc, qty: +i.qty || 0, rate: +i.rate || 0 }));
+      row.tax_rate = +$('#tax').value || 0;
+      row.total = calc(row.items, row.tax_rate).total;
+    }
+    try {
+      const rid = id ? (await q(sb.from('documents').update(row).eq('id', id)), id) : await nextInsert(row);
+      location.hash = `#/view/${rid}`;
+    } catch (err) { alert(err.message); }
+  };
+}
+
+/* ---------- view / print ---------- */
+async function view(v, id) {
+  const d = await q(sb.from('documents').select('*, customers(*)').eq('id', id).single());
+  const B = CONFIG.BUSINESS, c = d.customers || {}, f = d.data || {};
+  const cal = calc(d.items, d.tax_rate);
+  const body = d.type === 'agreement' ? `
+    <table><tbody>${[['Service', f.service], ['Vehicle', f.vehicle], ['Pick-up', f.pickup], ['Drop-off', f.dropoff], ['Start', f.start], ['End', f.end], ['Agreed rate', d.total ? money(d.total) : ''], ['Deposit', f.deposit]]
+      .filter(([, x]) => x).map(([k, x]) => `<tr><th>${k}</th><td>${esc(x)}</td></tr>`).join('')}</tbody></table>
+    <h3>Terms &amp; conditions</h3><div class="terms">${esc(f.terms)}</div>
+    <p>By signing below, both parties agree to the terms above.</p>
+    <div class="sig"><div>For Shammi Travels<br>Name / Date</div><div>Client: ${esc(c.name)}<br>Signature / Date</div></div>`
+  : `<table><thead><tr><th>Description</th><th class="num">Qty</th><th class="num">Rate</th><th class="num">Amount</th></tr></thead><tbody>${d.items.map((i) =>
+      `<tr><td>${esc(i.desc)}</td><td class="num">${esc(i.qty)}</td><td class="num">${money(i.rate)}</td><td class="num">${money(i.qty * i.rate)}</td></tr>`).join('')}</tbody>
+      <tfoot><tr><td colspan="3" class="num">Subtotal</td><td class="num">${money(cal.sub)}</td></tr>${d.tax_rate ? `<tr><td colspan="3" class="num">Tax (${esc(d.tax_rate)}%)</td><td class="num">${money(cal.tax)}</td></tr>` : ''}
+      <tr><td colspan="3" class="num"><b>Total</b></td><td class="num"><b>${money(d.total)}</b></td></tr></tfoot></table>
+      ${d.type === 'invoice' ? `<p><b>Payment details:</b> ${esc(B.payment)}</p>` : '<p>This quotation is an estimate and is subject to availability.</p>'}`;
+
+  v.innerHTML = `<div class="row noprint"><span>
+      <button class="primary" id="print">Print / Save PDF</button>
+      <a href="#/edit/${d.type}/${d.id}"><button>Edit</button></a>
+      ${d.type === 'quotation' ? '<button id="conv">Convert to invoice</button>' : ''}
+      <button class="danger" id="del">Delete</button></span>
+      <label style="margin:0">Status <select id="st">${STATUS[d.type].map((s) => `<option ${s === d.status ? 'selected' : ''}>${s}</option>`).join('')}</select></label></div>
+    <div class="sheet">
+      <div class="row"><div><h2>${esc(B.name)}</h2>${esc(B.address)}<br>${esc(B.phone)} · ${esc(B.email)}</div>
+        <div style="text-align:right"><h2>${LABEL[d.type].toUpperCase()}</h2>${esc(d.number)}<br>Date: ${esc(d.issue_date)}${d.due_date ? `<br>${d.type === 'invoice' ? 'Due' : 'Valid until'}: ${esc(d.due_date)}` : ''}</div></div>
+      <p><b>${d.type === 'agreement' ? 'Client' : 'Bill to'}:</b><br>${esc(c.name)}<br>${esc(c.address)}<br>${esc(c.phone)} ${esc(c.email)}</p>
+      ${body}${d.notes ? `<p><b>Notes:</b> ${esc(d.notes)}</p>` : ''}</div>`;
+  $('#print').onclick = () => print();
+  $('#st').onchange = async (e) => { try { await q(sb.from('documents').update({ status: e.target.value }).eq('id', id)); } catch (err) { alert(err.message); } };
+  $('#del').onclick = async () => {
+    if (!confirm(`Permanently delete ${d.number}?`)) return;
+    try { await q(sb.from('documents').delete().eq('id', id)); location.hash = `#/list/${d.type}`; } catch (err) { alert(err.message); }
+  };
+  if (d.type === 'quotation') $('#conv').onclick = async () => {
+    try {
+      const { id: _i, number: _n, created_at: _c, customers: _cu, ...rest } = d;
+      const nid = await nextInsert({ ...rest, type: 'invoice', status: 'draft', issue_date: today(), due_date: null });
+      location.hash = `#/view/${nid}`;
+    } catch (err) { alert(err.message); }
+  };
+}
+
+boot();
