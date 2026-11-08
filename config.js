@@ -1,7 +1,7 @@
 // The anon key is safe to publish: Row Level Security (schema.sql) blocks anyone not signed in.
 export const CONFIG = {
-  SUPABASE_URL: 'PASTE_PROJECT_URL',        // e.g. https://abcd.supabase.co
-  SUPABASE_ANON_KEY: 'PASTE_ANON_KEY',
+  SUPABASE_URL: 'https://byllsqoonhejvuzuuwbr.supabase.co',        
+  SUPABASE_ANON_KEY: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ5bGxzcW9vbmhlanZ1enV1d2JyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQxMjQ3NDQsImV4cCI6MjEwOTcwMDc0NH0.xozQKIriZ7zCqUp4YvxYam1tEV2JTxaYOC8NQtqHvOg',
   CURRENCY: 'Rs',
   // Business details and bank info live in the database (Settings page), not here.
   // Terms editor format: "# Heading" lines are headings, every other line is a bullet.

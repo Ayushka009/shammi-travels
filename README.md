@@ -6,7 +6,7 @@ Private back-office app: dashboard, invoices, quotations and service agreements 
 1. Create a free project at supabase.com.
 2. SQL Editor → paste and run `schema.sql`.
 3. Authentication → Providers → Email: turn **off** "Allow new users to sign up". Then Authentication → Users → **Add user** (your email + password).
-4. Project Settings → API: copy the Project URL and `anon` key into `config.js`. Edit the business details in the same file.
+4. Project Settings → API: copy the Project URL and `anon` key into `config.js`. After signing in, fill in Settings (business details and bank info are stored in the database, not in the code).
 5. GitHub → Settings → Pages → Deploy from branch `main`, folder `/ (root)`.
 6. Open the Pages URL and sign in.
 
