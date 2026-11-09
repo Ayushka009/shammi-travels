@@ -146,6 +146,31 @@ async function list(v, type = 'invoice') {
   v.innerHTML = `<div class="row"><h2>${LABEL[type]}s</h2><a href="#/edit/${type}"><button class="primary">New ${LABEL[type].toLowerCase()}</button></a></div><div class="card">${table(rows)}</div>`;
 }
 
+/* ---------- formatting guide shown under every terms & conditions box ---------- */
+const termsGuide = `<details class="guide"><summary>Formatting guide for terms &amp; conditions</summary>
+  <p>Write one item per line. The first characters of a line decide how it prints:</p>
+  <table class="gtbl"><thead><tr><th>Type this</th><th>It prints as</th></tr></thead><tbody>
+    <tr><td><code># 5. Payment Terms</code></td><td>A bold clause heading</td></tr>
+    <tr><td><code>Plain text on its own line</code></td><td>A normal paragraph</td></tr>
+    <tr><td><code>- Smoking is not allowed</code></td><td>A bullet point (• …)</td></tr>
+    <tr><td><code>1. Payment is due in 7 days</code></td><td>A numbered item (keep the number you type)</td></tr>
+    <tr><td><code>| Notice | Charge</code><br><code>| 7 days or more | No charge</code></td><td>A table. Start each row with <code>| </code> and separate cells with <code> | </code>. The first row is the grey header, and rows on consecutive lines form one table.</td></tr>
+    <tr><td><code>{{bank}}</code> (alone on a line)</td><td>Your bank details from Settings</td></tr>
+  </tbody></table>
+  <p>Example:</p>
+  <pre># 6. Cancellation Policy
+The following charges apply:
+| Notice received | Charge
+| 8 days or more | No charge
+| 7 days or less | 50% of the hire value
+- Written notice is required.
+1. First numbered point.
+# 7. Bank Details
+Payments shall be made to:
+{{bank}}</pre>
+  <p class="muted">Tips: blank lines are ignored. Bold, italics and links are not supported. If none of the markers above are used, every line prints as a bullet. Maximum 20,000 characters.</p>
+</details>`;
+
 /* ---------- settings ---------- */
 async function settings(v) {
   const f = (k, label, attrs = 'maxlength="200"') => `<label>${label}<input name="${k}" value="${esc(S[k])}" ${attrs}></label>`;
@@ -156,7 +181,7 @@ async function settings(v) {
     <label>Bank details (one line each, e.g. “Bank: …”, “Account Number: …”)<textarea name="bank" rows="7" maxlength="1000">${esc(S.bank)}</textarea></label>
     <label>Standard agreement terms
       <textarea name="terms" rows="14" maxlength="20000">${esc(S.terms)}</textarea></label>
-    <p class="muted">Format: “# Heading”, “- bullet”, “1. numbered”, “| col | col” table rows (first row is the header). A line with only {{bank}} prints the bank details above. New agreements start with these terms.</p>
+    ${termsGuide}
     <button class="primary">Save settings</button> <span id="ok" class="muted" role="status"></span></form>`;
   $('#sf').onsubmit = async (e) => {
     e.preventDefault();
@@ -355,7 +380,8 @@ async function edit(v, type, id, cid, qid) {
       <div class="grid">${field('company', 'Client organisation (e.g. Curtin University)')}${field('service', 'Service (e.g. airport transfer, tour)')}<label>Vehicle${vehicleSelect('name="vehicle"', f.vehicle)}</label>${field('pickup', 'Pick-up location')}${field('dropoff', 'Drop-off location')}${field('start', 'Start date', 'date')}${field('end', 'End date', 'date')}
       <label>Agreed total (${CONFIG.CURRENCY})<input name="rate" id="rate" inputmode="decimal" autocomplete="off" placeholder="0.00" maxlength="15" value="${d.total ? esc(fmtNum(d.total)) : ''}"></label>${field('deposit', 'Deposit')}</div>
       <label>Terms & conditions<textarea name="terms" rows="14" required maxlength="20000">${esc(f.terms)}</textarea></label>
-      <button type="button" id="resetTerms">Load standard terms</button>`
+      <button type="button" id="resetTerms">Load standard terms</button>
+      ${termsGuide}`
     : `<h3>Items</h3><div id="items"></div><button type="button" id="add">+ Add line</button>
       <p id="totals" class="num"></p>
       ${type === 'invoice' ? `<h3>Payment plan</h3>

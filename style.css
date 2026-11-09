@@ -94,3 +94,10 @@ td input.cost{width:130px;margin:0;text-align:right}
 .sheet .stamp.ok{border-color:#0b6e4f;color:#0b6e4f}
 .mini{min-height:28px;padding:0 8px;font-size:12px}
 .sheet input.pd{width:auto;display:inline-block;margin:0 4px;padding:2px 4px;font-size:12px;background:#fff;color:#111}
+
+details.guide{margin:10px 0;border:1px solid var(--line);border-radius:8px;padding:8px 12px;background:var(--bg)}
+details.guide summary{cursor:pointer;font-weight:600}
+details.guide pre{white-space:pre-wrap;background:var(--card);border:1px solid var(--line);border-radius:6px;padding:10px;font-size:13px;overflow-x:auto}
+details.guide code{background:var(--card);border:1px solid var(--line);border-radius:4px;padding:0 4px;font-size:13px}
+table.gtbl{width:100%;border-collapse:collapse;margin:6px 0}
+table.gtbl th,table.gtbl td{border-bottom:1px solid var(--line);padding:6px;text-align:left;vertical-align:top}
