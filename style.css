@@ -101,3 +101,6 @@ details.guide pre{white-space:pre-wrap;background:var(--card);border:1px solid v
 details.guide code{background:var(--card);border:1px solid var(--line);border-radius:4px;padding:0 4px;font-size:13px}
 table.gtbl{width:100%;border-collapse:collapse;margin:6px 0}
 table.gtbl th,table.gtbl td{border-bottom:1px solid var(--line);padding:6px;text-align:left;vertical-align:top}
+
+td.pnote{font-size:13px;max-width:340px;white-space:pre-line}
+.rf{margin-top:8px}

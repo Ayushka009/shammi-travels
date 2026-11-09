@@ -101,7 +101,7 @@ async function route() {
   v.innerHTML = '<p class="muted">Loading…</p>';
   try {
     await loadSettings();
-    const fn = { dashboard, customers, customer, list, edit, view, settings, profit }[page] || dashboard;
+    const fn = { dashboard, customers, customer, list, edit, view, settings, profit, providers }[page] || dashboard;
     await fn(v, a, b, c, e5);
   } catch (e) { v.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
@@ -289,6 +289,110 @@ async function profitDetail(v, id) {
     }
     try { await q(sb.from('documents').update({ items: next }).eq('id', id)); items.splice(0, items.length, ...next); $('#pok').textContent = 'Saved.'; }
     catch (err) { $('#perr').textContent = err.message; }
+  };
+}
+
+/* ---------- service providers: the suppliers we hire vehicles from, and the rates they charge us ---------- */
+async function providers(v) {
+  const [provs, rates] = await Promise.all([
+    q(sb.from('service_providers').select('*').order('name')),
+    q(sb.from('provider_rates').select('*').order('vehicle').order('rate')),
+  ]);
+  const covers = (r) => r.hours ? `${r.hours} hrs${r.included_km ? ` / ${r.included_km} km` : ''}` : r.included_km ? `First ${r.included_km} km` : '—';
+  const names = [...new Set([...VEHICLES, ...rates.map((r) => r.vehicle)])];
+  const rateForm = (pid) => `<form class="rf" data-prov="${pid}" novalidate><input type="hidden" name="id">
+      <div class="grid">
+        <label>Vehicle <input name="vehicle" list="vlist" required maxlength="80" autocomplete="off"></label>
+        <label>Hours (hourly package) <input name="hours" type="number" min="0" max="72" step="any" placeholder="e.g. 12"></label>
+        <label>Included km <input name="included_km" type="number" min="0" max="10000" step="any" placeholder="e.g. 100"></label>
+        <label>Rate (${CONFIG.CURRENCY}) <input name="rate" data-money inputmode="decimal" autocomplete="off" maxlength="15" required placeholder="0.00"></label>
+        <label>Extra per km (${CONFIG.CURRENCY}) <input name="extra_km_rate" data-money inputmode="decimal" autocomplete="off" maxlength="15" placeholder="0.00"></label>
+      </div>
+      <p class="muted">The rate covers the hours and km above. “Extra per km” is charged for every km beyond the included km.</p>
+      <label>Notes <textarea name="notes" rows="2" maxlength="600"></textarea></label>
+      <p class="err rerr" role="alert"></p>
+      <button class="primary">Save rate</button> <button type="button" data-rcancel>Cancel</button></form>`;
+  const card = (p) => {
+    const rs = rates.filter((r) => r.provider_id === p.id);
+    return `<div class="card" data-prov="${p.id}">
+      <div class="row"><h3>${esc(p.name)}</h3><span><button type="button" data-pedit="${p.id}">Edit</button> <button type="button" class="danger" data-pdel="${p.id}">Delete</button></span></div>
+      <p class="muted">${esc([p.phone, p.email].filter(Boolean).join(' · '))}${p.notes ? ` — ${esc(p.notes)}` : ''}</p>
+      ${rs.length ? `<div class="tablewrap"><table><thead><tr><th>Vehicle</th><th>Covers</th><th class="num">Rate</th><th class="num">Extra per km</th><th>Notes</th><th></th></tr></thead><tbody>${rs.map((r) =>
+        `<tr><td>${esc(r.vehicle)}</td><td>${esc(covers(r))}</td><td class="num">${money(r.rate)}</td><td class="num">${r.extra_km_rate === null ? '—' : money(r.extra_km_rate)}</td><td class="pnote">${esc(r.notes)}</td>
+         <td class="num"><button type="button" data-redit="${r.id}">Edit</button> <button type="button" class="danger" data-rdel="${r.id}">Delete</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">No rates yet.</p>'}
+      <details class="guide" data-rdetails="${p.id}"><summary>Add a rate</summary>${rateForm(p.id)}</details></div>`;
+  };
+  v.innerHTML = `<h2>Service Providers</h2>
+    <datalist id="vlist">${names.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
+    <form id="pf" class="card" novalidate><h3 id="pftitle">Add a provider</h3><input type="hidden" name="id">
+      <div class="grid"><label>Name <input name="name" required maxlength="120"></label>
+        <label>Phone <input name="phone" type="tel" pattern="[0-9+ ]{7,20}" maxlength="20" title="7 to 20 characters: digits, + and spaces"></label>
+        <label>Email <input name="email" type="email" maxlength="120"></label></div>
+      <label>Notes <textarea name="notes" rows="2" maxlength="500"></textarea></label>
+      <p id="pferr" class="err" role="alert"></p>
+      <button class="primary">Save provider</button> <button type="button" id="pfcancel" hidden>Cancel</button></form>
+    ${provs.length ? provs.map(card).join('') : '<p class="muted">No providers yet. Add one above, then add the rates they charge.</p>'}`;
+
+  const num = (s) => String(s).trim() === '' ? null : Number(s);
+  const pf = $('#pf');
+  const resetPf = () => { pf.reset(); pf.id.value = ''; $('#pftitle').textContent = 'Add a provider'; $('#pfcancel').hidden = true; $('#pferr').textContent = ''; };
+  v.oninput = (e) => { if (e.target.dataset.money !== undefined) liveMoney(e.target); };
+
+  v.onclick = async (e) => {
+    const t = e.target, d = t.dataset;
+    try {
+      if (d.pedit) {
+        const p = provs.find((x) => x.id === d.pedit);
+        pf.id.value = p.id; pf.name.value = p.name; pf.phone.value = p.phone || ''; pf.email.value = p.email || ''; pf.notes.value = p.notes || '';
+        $('#pftitle').textContent = `Edit ${p.name}`; $('#pfcancel').hidden = false; pf.scrollIntoView({ block: 'center' }); pf.name.focus();
+      } else if (t.id === 'pfcancel') resetPf();
+      else if (d.pdel) {
+        const p = provs.find((x) => x.id === d.pdel), n = rates.filter((r) => r.provider_id === p.id).length;
+        if (confirm(`Delete ${p.name}${n ? ` and its ${n} rate${n > 1 ? 's' : ''}` : ''}? This cannot be undone.`)) { await q(sb.from('service_providers').delete().eq('id', p.id)); route(); }
+      } else if (d.redit) {
+        const r = rates.find((x) => x.id === d.redit), det = v.querySelector(`[data-rdetails="${r.provider_id}"]`), f = det.querySelector('form');
+        det.open = true; det.querySelector('summary').textContent = `Edit rate: ${r.vehicle}`;
+        f.id.value = r.id; f.vehicle.value = r.vehicle; f.hours.value = r.hours ?? ''; f.included_km.value = r.included_km ?? '';
+        f.rate.value = fmtNum(r.rate); f.extra_km_rate.value = r.extra_km_rate === null ? '' : fmtNum(r.extra_km_rate); f.notes.value = r.notes || '';
+        det.scrollIntoView({ block: 'center' }); f.vehicle.focus();
+      } else if (d.rcancel !== undefined) {
+        const det = t.closest('details'); det.querySelector('form').reset(); det.querySelector('[name=id]').value = ''; det.querySelector('summary').textContent = 'Add a rate'; det.querySelector('.rerr').textContent = ''; det.open = false;
+      } else if (d.rdel) {
+        const r = rates.find((x) => x.id === d.rdel);
+        if (confirm(`Delete the ${r.vehicle} rate?`)) { await q(sb.from('provider_rates').delete().eq('id', r.id)); route(); }
+      }
+    } catch (err) { alert(err.message); }
+  };
+
+  v.onsubmit = async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    try {
+      if (f.matches('#pf')) {                                          // ---- provider (not f.id: the hidden field named "id" shadows it)
+        const err = $('#pferr'); err.textContent = '';
+        const row = { name: f.name.value.trim().replace(/\s+/g, ' '), phone: f.phone.value.trim(), email: f.email.value.trim(), notes: f.notes.value.trim() };
+        if (!row.name) return (err.textContent = 'Enter the provider name.');
+        if (!f.phone.checkValidity()) return (err.textContent = 'The phone must be 7 to 20 characters: digits, + and spaces.');
+        if (!f.email.checkValidity()) return (err.textContent = 'Enter a valid email address.');
+        if (provs.some((p) => p.id !== f.id.value && p.name.toLowerCase() === row.name.toLowerCase())) return (err.textContent = `A provider named “${row.name}” already exists.`);
+        await q(f.id.value ? sb.from('service_providers').update(row).eq('id', f.id.value) : sb.from('service_providers').insert(row));
+        route();
+      } else if (f.classList.contains('rf')) {                         // ---- rate
+        const err = f.querySelector('.rerr'); err.textContent = '';
+        const bad = (m, el) => { err.textContent = m; el?.focus(); };
+        const row = { provider_id: f.dataset.prov, vehicle: f.vehicle.value.trim().replace(/\s+/g, ' '), hours: num(f.hours.value), included_km: num(f.included_km.value),
+          rate: parseNum(f.rate.value), extra_km_rate: f.extra_km_rate.value.trim() === '' ? null : parseNum(f.extra_km_rate.value), notes: f.notes.value.trim() };
+        if (!row.vehicle) return bad('Enter the vehicle.', f.vehicle);
+        if (row.hours !== null && !(row.hours > 0 && row.hours <= 72)) return bad('Hours must be between 0 and 72, or left empty.', f.hours);
+        if (row.included_km !== null && !(row.included_km >= 0 && row.included_km <= 10000)) return bad('Included km must be between 0 and 10,000, or left empty.', f.included_km);
+        if (!(row.rate > 0) || row.rate > MAXAMT) return bad('Enter a rate greater than 0.', f.rate);
+        if (row.extra_km_rate !== null && row.extra_km_rate > MAXAMT) return bad('The extra per-km rate is too large.', f.extra_km_rate);
+        if (rates.some((r) => r.provider_id === row.provider_id && r.id !== f.id.value && r.vehicle.toLowerCase() === row.vehicle.toLowerCase() && (r.hours ?? null) === row.hours && (r.included_km ?? null) === row.included_km))
+          return bad('This provider already has a rate for that vehicle, hours and km. Edit it instead.', f.vehicle);
+        await q(f.id.value ? sb.from('provider_rates').update(row).eq('id', f.id.value) : sb.from('provider_rates').insert(row));
+        route();
+      }
+    } catch (err) { alert(err.message); }
   };
 }
 

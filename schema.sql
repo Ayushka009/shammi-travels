@@ -40,3 +40,26 @@ alter table documents enable row level security;
 create policy "auth only" on settings for all to authenticated using (true) with check (true);
 create policy "auth only" on customers for all to authenticated using (true) with check (true);
 create policy "auth only" on documents for all to authenticated using (true) with check (true);
+
+-- Service providers: suppliers we hire vehicles from, and the rates they charge us
+create table service_providers (
+  id uuid primary key default gen_random_uuid(),
+  name text not null unique,
+  phone text, email text, notes text,
+  created_at timestamptz default now()
+);
+create table provider_rates (
+  id uuid primary key default gen_random_uuid(),
+  provider_id uuid not null references service_providers(id) on delete cascade,
+  vehicle text not null,
+  hours numeric,            -- hourly package length (empty for per-km pricing)
+  included_km numeric,      -- km covered by the rate
+  rate numeric not null check (rate >= 0),
+  extra_km_rate numeric,    -- charged per km beyond included_km
+  notes text,
+  created_at timestamptz default now()
+);
+alter table service_providers enable row level security;
+alter table provider_rates enable row level security;
+create policy "auth only" on service_providers for all to authenticated using (true) with check (true);
+create policy "auth only" on provider_rates for all to authenticated using (true) with check (true);
