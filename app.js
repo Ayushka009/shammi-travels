@@ -64,7 +64,7 @@ $('#loginForm').onsubmit = async (e) => {
 $('#logout').onclick = () => sb.auth.signOut();
 
 /* ---------- router ---------- */
-let S = { name: 'Shammi Travels', address: '', phone: '', email: '', signatory: '', bank: '' };
+let S = { name: 'Shammi Travels', address: '', phone: '', email: '', signatory: '', bank: '', subsidiary: '', pv: '', terms: '' };
 let settingsLoaded = false;
 async function loadSettings() {
   if (settingsLoaded) return;
@@ -131,7 +131,11 @@ async function settings(v) {
   v.innerHTML = `<h2>Settings</h2><form id="sf" class="card">
     <p class="muted">Printed on invoices, quotations and agreements. Stored in your database, behind login.</p>
     <div class="grid">${f('name', 'Business name')}${f('address', 'Address')}${f('phone', 'Phone', 'type="tel" pattern="[0-9+ ]{7,20}" maxlength="20" title="7 to 20 characters: digits, + and spaces"')}${f('email', 'Email', 'type="email" maxlength="120"')}${f('signatory', 'Authorized signatory (agreements)')}</div>
+    <div class="grid">${f('subsidiary', 'Subsidiary line (printed under the name in every document header)', 'maxlength="120" placeholder="e.g. A subsidiary of …"')}${f('pv', 'Company PV number', 'maxlength="30" pattern="[A-Za-z0-9 ]{3,30}" title="Letters, digits and spaces"')}</div>
     <label>Bank details (one line each, e.g. “Bank: …”, “Account Number: …”)<textarea name="bank" rows="7" maxlength="1000">${esc(S.bank)}</textarea></label>
+    <label>Standard agreement terms
+      <textarea name="terms" rows="14" maxlength="20000">${esc(S.terms)}</textarea></label>
+    <p class="muted">Format: “# Heading”, “- bullet”, “1. numbered”, “| col | col” table rows (first row is the header). A line with only {{bank}} prints the bank details above. New agreements start with these terms.</p>
     <button class="primary">Save settings</button> <span id="ok" class="muted" role="status"></span></form>`;
   $('#sf').onsubmit = async (e) => {
     e.preventDefault();
@@ -310,7 +314,7 @@ async function edit(v, type, id, cid, qid) {
   const quotes = type === 'agreement' || existing?.type === 'agreement'
     ? await q(sb.from('documents').select('id,number,customer_id,total,items,data,status').eq('type', 'quotation').or(['status.eq.accepted', ...linkIds.map((x) => `id.eq.${x}`)].join(',')))
     : [];
-  const d = existing || { type, customer_id: cid, status: 'draft', issue_date: today(), items: [newItem()], tax_rate: 0, data: { terms: CONFIG.DEFAULT_TERMS }, notes: '' };
+  const d = existing || { type, customer_id: cid, status: 'draft', issue_date: today(), items: [newItem()], tax_rate: 0, data: { terms: S.terms }, notes: '' };
   type = d.type;
   const f = d.data || {};
   const agr = type === 'agreement';
@@ -372,7 +376,7 @@ async function edit(v, type, id, cid, qid) {
     };
     const sync = () => { const x = quotes.find((y) => y.id === qsel.value); rate.readOnly = !!x; if (x) rate.value = fmtNum(x.total); };
     rate.oninput = () => liveMoney(rate);
-    $('#resetTerms').onclick = () => { if (confirm('Replace the terms below with the standard Transportation Services Agreement terms?')) document.querySelector('[name=terms]').value = CONFIG.DEFAULT_TERMS; };
+    $('#resetTerms').onclick = () => { if (!S.terms) return alert('There are no standard terms yet. Add them under Settings first.'); if (confirm('Replace the terms below with the standard Transportation Services Agreement terms?')) document.querySelector('[name=terms]').value = S.terms; };
     cust.onchange = () => fillQ('');
     qsel.onchange = sync;
     fillQ(f.quotation_id || qid || '');
@@ -444,9 +448,10 @@ async function view(v, id) {
     return html;
   };
   const client = f.company || c.name;
+  const provider = [B.name, B.subsidiary && B.subsidiary.charAt(0).toLowerCase() + B.subsidiary.slice(1)].filter(Boolean).join(', ');
   const parties = `<h3 class="sec">PARTIES</h3>
     <p class="p">This Transportation Services Agreement (“Agreement”) is entered into on ${esc(ldate(d.issue_date))}, between:</p>
-    <p class="p"><b>Service Provider:</b> ${esc(CONFIG.PROVIDER)} (${esc(CONFIG.PROVIDER_REG)}), hereinafter referred to as the “Service Provider”.</p>
+    <p class="p"><b>Service Provider:</b> ${esc(provider)}${B.pv ? ` (PV: ${esc(B.pv)})` : ''}, hereinafter referred to as the “Service Provider”.</p>
     <p class="p"><b>Client:</b> ${esc(client)}, hereinafter referred to as the “Client”.</p>
     <p class="p">The Service Provider and the Client shall collectively be referred to as the “Parties”.</p>`;
   const section = (key) => {
@@ -460,7 +465,7 @@ async function view(v, id) {
     return `<h3 class="sec">${SECTIONS[key].toUpperCase()}</h3><table class="rates"><thead><tr>${head}</tr></thead><tbody>${rows.map((i) => `<tr>${row(i)}</tr>`).join('')}</tbody></table>`;
   };
   const signBlock = `<h4>21. Signatures</h4><p class="p">By signing below, both Parties acknowledge that they have read, understood and agreed to the terms and conditions of this Agreement.</p>
-    <div class="sig"><div><b>FOR THE SERVICE PROVIDER</b><br>${esc(CONFIG.PROVIDER)}<br>Name: ${esc(B.signatory || 'Ayushka Weerasinghe')}<br>Date: ${esc(ldate(d.issue_date, '-'))}</div>
+    <div class="sig"><div><b>FOR THE SERVICE PROVIDER</b><br>${esc(provider)}<br>Name: ${esc(B.signatory || 'Ayushka Weerasinghe')}<br>Date: ${esc(ldate(d.issue_date, '-'))}</div>
     <div><b>FOR THE CLIENT</b><br>${esc(client)}<br>Name: ${esc(c.name)}<br>Designation: ____________________<br>Signature: ____________________<br>Date: ____________________</div></div>`;
   const bank = bankLines.length ? `<h4>Bank Details</h4>${bankLines.map((l) => `<p class="b">${esc(l)}</p>`).join('')}` : '';
   const body = d.type === 'agreement' ? `
@@ -481,7 +486,7 @@ async function view(v, id) {
       <button class="danger" id="del">Delete</button></span>
       <label style="margin:0">Status <select id="st">${STATUS[d.type].map((s) => `<option ${s === d.status ? 'selected' : ''}>${s}</option>`).join('')}</select></label></div>
     <div class="sheet">
-      <div class="row"><div><img src="logo.png" alt="" class="logo-doc"><br><b>${esc(B.name)}</b><br>${esc(B.address)}<br>${esc([B.phone, B.email].filter(Boolean).join(' · '))}</div>
+      <div class="row"><div><img src="logo.png" alt="" class="logo-doc"><br><b>${esc(B.name)}</b>${B.subsidiary ? `<br>${esc(B.subsidiary)}${B.pv ? ` (PV ${esc(B.pv)})` : ''}` : ''}<br>${esc(B.address)}<br>${esc([B.phone, B.email].filter(Boolean).join(' · '))}</div>
         <div style="text-align:right"><h2>${d.type === 'agreement' ? 'TRANSPORTATION SERVICES AGREEMENT' : LABEL[d.type].toUpperCase()}</h2>${esc(d.number)}${d.type === 'agreement' ? '' : '<br>' + esc(KINDS[kindOf(d)])}<br>Date: ${esc(d.issue_date)}${d.due_date ? `<br>${d.type === 'invoice' ? 'Due' : 'Valid until'}: ${esc(d.due_date)}` : ''}</div></div>
       ${d.type === 'agreement' ? '' : `<p><b>Bill to:</b><br>${esc(c.name)}<br>${esc(c.address)}<br>${esc(c.phone)} ${esc(c.email)}</p>`}
       ${body}${d.notes ? `<p><b>Notes:</b> ${esc(d.notes)}</p>` : ''}</div>`;

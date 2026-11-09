@@ -27,7 +27,10 @@ create table documents (
 create table settings (   -- single row: business details printed on documents
   id int primary key default 1 check (id = 1),
   name text, address text, phone text, email text, signatory text,
-  bank text                -- one line per row, printed on invoices/agreements
+  bank text,               -- one line per row, printed on invoices/agreements
+  subsidiary text,         -- e.g. "A subsidiary of …", printed in document headers
+  pv text,                 -- company PV number, printed in headers and agreements
+  terms text               -- standard agreement terms (see Settings page for the format)
 );
 insert into settings (id, name) values (1, 'Shammi Travels');
 
