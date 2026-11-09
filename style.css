@@ -84,3 +84,13 @@ main a{color:var(--brand)}
 .neg{color:var(--danger)}
 .sec2{margin:18px 0 6px}
 td input.cost{width:130px;margin:0;text-align:right}
+
+.payrow{display:grid;gap:8px;grid-template-columns:3fr 1fr 1.4fr 1.4fr auto;align-items:end;margin-bottom:8px}
+@media (max-width:640px){.payrow{grid-template-columns:1fr 1fr}.payrow>label:first-child{grid-column:1/-1}}
+.payrow .amt{padding-bottom:10px;white-space:nowrap}
+.sheet table.sumtbl{width:auto;margin:10px 0 10px auto;min-width:260px}
+.sheet table.sumtbl td{padding:4px 10px;border:0}
+.sheet .stamp{display:inline-block;margin-top:6px;padding:2px 10px;border:2px solid #b3261e;color:#b3261e;letter-spacing:1px}
+.sheet .stamp.ok{border-color:#0b6e4f;color:#0b6e4f}
+.mini{min-height:28px;padding:0 8px;font-size:12px}
+.sheet input.pd{width:auto;display:inline-block;margin:0 4px;padding:2px 4px;font-size:12px;background:#fff;color:#111}

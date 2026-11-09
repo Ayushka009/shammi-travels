@@ -35,6 +35,26 @@ const liveMoney = (el) => {
   while (p < el.value.length && n < digits) { if (/[\d.]/.test(el.value[p])) n++; p++; }
   el.setSelectionRange(p, p);
 };
+const r2 = (n) => Math.round(n * 100) / 100;
+// Payment schedule of an invoice: instalments with a percentage each. The amounts are always computed from the
+// current total (last instalment takes the rounding difference). Old invoices without a plan count as one 100% payment.
+const schedule = (d) => {
+  const total = Number(d.total) || 0;
+  const rows = d.data?.payments?.length ? d.data.payments : [{ label: 'Full payment', percent: 100, due: d.due_date || '', paid: false, paidDate: '' }];
+  let acc = 0;
+  return rows.map((r, i) => {
+    const amount = i === rows.length - 1 ? r2(total - acc) : Math.round(total * (+r.percent || 0)) / 100;
+    acc += amount;
+    const paid = d.status === 'paid' ? true : !!r.paid;
+    return { ...r, amount, paid, paidDate: r.paidDate || (paid && d.status === 'paid' ? d.issue_date : '') };
+  });
+};
+const paidOf = (d) => r2(schedule(d).filter((s) => s.paid).reduce((a, s) => a + s.amount, 0));
+const statusLabel = (d) => {
+  if (d.type !== 'invoice' || d.status === 'paid' || d.status === 'cancelled' || !(Number(d.total) > 0)) return d.status;
+  const p = paidOf(d);
+  return p > 0 ? `${d.status} · ${Math.round(p / Number(d.total) * 100)}% paid` : d.status;
+};
 const ym = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 const LABEL = { invoice: 'Invoice', quotation: 'Quotation', agreement: 'Service Agreement' };
 const PREFIX = { invoice: 'INV', quotation: 'QUO', agreement: 'AGR' };
@@ -89,21 +109,22 @@ window.addEventListener('hashchange', route);
 
 /* ---------- dashboard ---------- */
 async function dashboard(v) {
-  const docs = await q(sb.from('documents').select('id,type,number,status,total,issue_date,customer_id,customers(name)').order('created_at', { ascending: false }));
-  const inv = docs.filter((d) => d.type === 'invoice');
+  const docs = await q(sb.from('documents').select('id,type,number,status,total,issue_date,customer_id,data,customers(name)').order('created_at', { ascending: false }));
+  const inv = docs.filter((d) => d.type === 'invoice' && d.status !== 'cancelled');
   const quo = docs.filter((d) => d.type === 'quotation');
   const sum = (a) => a.reduce((s, d) => s + Number(d.total), 0);
-  const paid = inv.filter((d) => d.status === 'paid');
-  const owed = inv.filter((d) => d.status === 'sent' || d.status === 'draft');
+  const sched = inv.flatMap((d) => schedule(d).map((s) => ({ ...s, d })));
+  const paidAmt = sched.filter((s) => s.paid).reduce((a, s) => a + s.amount, 0), owedAmt = sched.filter((s) => !s.paid).reduce((a, s) => a + s.amount, 0);
+  const paidInv = inv.filter((d) => paidOf(d) > 0).length, owedInv = inv.filter((d) => paidOf(d) < Number(d.total) - 0.005).length;
   const open = quo.filter((d) => d.status === 'sent' || d.status === 'draft');
   const months = [...Array(6)].map((_, i) => { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - 5 + i); return ym(d); });
-  const rev = months.map((m) => sum(paid.filter((d) => d.issue_date.startsWith(m))));
+  const rev = months.map((m) => sched.filter((s) => s.paid && String(s.paidDate || s.d.issue_date).startsWith(m)).reduce((a, s) => a + s.amount, 0));
   const max = Math.max(...rev, 1);
   v.innerHTML = `
     <h2>Dashboard</h2>
     <div class="grid">
-      <div class="card stat"><span class="muted">Paid</span><b>${money(sum(paid))}</b>${paid.length} invoices</div>
-      <div class="card stat"><span class="muted">Outstanding</span><b>${money(sum(owed))}</b>${owed.length} invoices</div>
+      <div class="card stat"><span class="muted">Paid</span><b>${money(paidAmt)}</b>${paidInv} invoices</div>
+      <div class="card stat"><span class="muted">Outstanding</span><b>${money(owedAmt)}</b>${owedInv} invoices</div>
       <div class="card stat"><span class="muted">Open quotations</span><b>${money(sum(open))}</b>${open.length} quotations</div>
       <div class="card stat"><span class="muted">Agreements</span><b>${docs.filter((d) => d.type === 'agreement').length}</b>on file</div>
     </div>
@@ -118,10 +139,10 @@ async function dashboard(v) {
 
 /* ---------- lists ---------- */
 const table = (rows, hideCust = false) => rows.length ? `<div class="tablewrap"><table><thead><tr><th>No.</th>${hideCust ? '' : '<th>Customer</th>'}<th>Date</th><th class="num">Total</th><th>Status</th></tr></thead><tbody>${rows.map((d) =>
-  `<tr><td><a href="#/view/${d.id}">${esc(d.number)}</a></td>${hideCust ? '' : `<td><a href="#/customer/${d.customer_id}">${esc(d.customers?.name)}</a></td>`}<td>${esc(d.issue_date)}</td><td class="num">${d.total > 0 ? money(d.total) : '-'}</td><td>${esc(d.status)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">Nothing here yet.</p>';
+  `<tr><td><a href="#/view/${d.id}">${esc(d.number)}</a></td>${hideCust ? '' : `<td><a href="#/customer/${d.customer_id}">${esc(d.customers?.name)}</a></td>`}<td>${esc(d.issue_date)}</td><td class="num">${d.total > 0 ? money(d.total) : '-'}</td><td>${esc(statusLabel(d))}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">Nothing here yet.</p>';
 
 async function list(v, type = 'invoice') {
-  const rows = await q(sb.from('documents').select('id,number,status,total,issue_date,customer_id,customers(name)').eq('type', type).order('created_at', { ascending: false }));
+  const rows = await q(sb.from('documents').select('id,type,number,status,total,issue_date,customer_id,data,customers(name)').eq('type', type).order('created_at', { ascending: false }));
   v.innerHTML = `<div class="row"><h2>${LABEL[type]}s</h2><a href="#/edit/${type}"><button class="primary">New ${LABEL[type].toLowerCase()}</button></a></div><div class="card">${table(rows)}</div>`;
 }
 
@@ -250,16 +271,17 @@ async function profitDetail(v, id) {
 async function customer(v, id) {
   const [c, docs] = await Promise.all([
     q(sb.from('customers').select('*').eq('id', id).single()),
-    q(sb.from('documents').select('id,type,number,status,total,issue_date,customer_id').eq('customer_id', id).order('issue_date', { ascending: false })),
+    q(sb.from('documents').select('id,type,number,status,total,issue_date,customer_id,data').eq('customer_id', id).order('issue_date', { ascending: false })),
   ]);
   const by = (t) => docs.filter((d) => d.type === t);
   const sum = (a) => a.reduce((s, d) => s + Number(d.total), 0);
   const inv = by('invoice');
-  const paid = inv.filter((d) => d.status === 'paid'), owed = inv.filter((d) => d.status === 'sent' || d.status === 'draft');
+  const liveInv = inv.filter((d) => d.status !== 'cancelled');
+  const paidAmt = liveInv.reduce((s, d) => s + paidOf(d), 0), owedAmt = liveInv.reduce((s, d) => s + Number(d.total) - paidOf(d), 0);
   const block = (t, title) => `<div class="card"><div class="row"><h3>${title} (${by(t).length})</h3><a href="#/edit/${t}/-/${id}"><button class="primary">New ${LABEL[t].toLowerCase()}</button></a></div>${table(by(t), true)}</div>`;
   v.innerHTML = `<div class="row"><h2>${esc(c.name)}</h2><a href="#/customers"><button>All customers</button></a></div>
     <div class="card"><span class="muted">${esc([c.phone, c.email, c.address].filter(Boolean).join(' · ')) || 'No contact details'}</span></div>
-    <div class="grid"><div class="card stat"><span class="muted">Paid</span><b>${money(sum(paid))}</b></div><div class="card stat"><span class="muted">Outstanding</span><b>${money(sum(owed))}</b></div></div>
+    <div class="grid"><div class="card stat"><span class="muted">Paid</span><b>${money(paidAmt)}</b></div><div class="card stat"><span class="muted">Outstanding</span><b>${money(owedAmt)}</b></div></div>
     ${block('invoice', 'Invoices')}${block('quotation', 'Quotations')}${block('agreement', 'Agreements')}`;
 }
 
@@ -314,7 +336,7 @@ async function edit(v, type, id, cid, qid) {
   const quotes = type === 'agreement' || existing?.type === 'agreement'
     ? await q(sb.from('documents').select('id,number,customer_id,total,items,data,status').eq('type', 'quotation').or(['status.eq.accepted', ...linkIds.map((x) => `id.eq.${x}`)].join(',')))
     : [];
-  const d = existing || { type, customer_id: cid, status: 'draft', issue_date: today(), items: [newItem()], tax_rate: 0, data: { terms: S.terms }, notes: '' };
+  const d = existing || { type, customer_id: cid, status: 'draft', issue_date: today(), items: [newItem()], tax_rate: 0, data: type === 'agreement' ? { terms: S.terms } : {}, notes: '' };
   type = d.type;
   const f = d.data || {};
   const agr = type === 'agreement';
@@ -326,7 +348,7 @@ async function edit(v, type, id, cid, qid) {
       <label>Customer <select name="customer_id" required><option value="">Select…</option>${custs.map((c) => `<option value="${c.id}" ${c.id === d.customer_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
       <label>Date <input name="issue_date" type="date" min="${DMIN}" max="${DMAX}" value="${esc(d.issue_date)}" required></label>
       ${agr ? '' : `<label>${LABEL[type]} type <select name="kind">${Object.entries(KINDS).map(([k, n]) => `<option value="${k}" ${k === kindOf(d) ? 'selected' : ''}>${n}</option>`).join('')}</select></label>`}
-      ${type === 'agreement' ? '' : `<label>${type === 'invoice' ? 'Due date' : 'Valid until'} <input name="due_date" type="date" min="${DMIN}" max="${DMAX}" value="${esc(d.due_date)}"></label>`}
+      ${type === 'agreement' ? '' : `<label>${type === 'invoice' ? 'Due date' : 'Valid until'} <input name="due_date" type="date" min="${DMIN}" max="${DMAX}" value="${esc(d.due_date)}" ${type === 'invoice' ? 'required' : ''}></label>`}
       <label>Status <select name="status">${STATUS[type].map((s) => `<option ${s === d.status ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
     </div>
     ${agr ? `<label>Based on accepted quotation <select name="quotation_id" id="qsel"></select></label>
@@ -335,7 +357,16 @@ async function edit(v, type, id, cid, qid) {
       <label>Terms & conditions<textarea name="terms" rows="14" required maxlength="20000">${esc(f.terms)}</textarea></label>
       <button type="button" id="resetTerms">Load standard terms</button>`
     : `<h3>Items</h3><div id="items"></div><button type="button" id="add">+ Add line</button>
-      <p id="totals" class="num"></p>`}
+      <p id="totals" class="num"></p>
+      ${type === 'invoice' ? `<h3>Payment plan</h3>
+      <label>Payment <select id="pmode"><option value="full">Full payment (100%)</option><option value="split">Split payment (instalments)</option></select></label>
+      <div id="pwrap" hidden>
+        <p class="muted">Presets: <button type="button" data-preset="50,50">50% / 50%</button> <button type="button" data-preset="30,70">30% / 70%</button> <button type="button" data-preset="40,30,30">40% / 30% / 30%</button></p>
+        <div id="pays"></div>
+        <button type="button" id="padd">+ Add instalment</button>
+        <p id="psum" class="num"></p>
+        <p class="muted">Amounts are worked out from the invoice total. The invoice due date becomes the last instalment's date. Paid instalments are locked.</p>
+      </div>` : ''}`}
     <label>Notes <textarea name="notes" maxlength="1000">${esc(d.notes)}</textarea></label>
     <p id="ferr" class="err" role="alert"></p>
     <button class="primary">Save</button> <a href="#/list/${type}"><button type="button">Cancel</button></a>
@@ -345,7 +376,31 @@ async function edit(v, type, id, cid, qid) {
   let kind = kindOf(d);
   const fit = () => items.forEach((i) => { if (!KIND_SECTIONS[kind].includes(i.section)) i.section = KIND_SECTIONS[kind][0]; });
   fit();
-  const totals = () => { if (!agr) $('#totals').innerHTML = `<b>Total ${money(calc(items).total)}</b>`; };
+  // ---- invoice payment plan: full payment, or split into percentage instalments
+  let pay = (f.payments && f.payments.length) ? f.payments.map((x) => ({ ...x })) : [{ label: 'Full payment', percent: 100, due: d.due_date || '', paid: false, paidDate: '' }];
+  let mode = pay.length > 1 ? 'split' : 'full';
+  const dueEl = () => document.querySelector('[name=due_date]'), issueEl = () => document.querySelector('[name=issue_date]');
+  const lastDue = () => pay.map((p) => p.due).filter(Boolean).sort().at(-1) || '';
+  function payAmounts() {
+    if (type !== 'invoice') return;
+    schedule({ total: calc(items).total, status: 'draft', data: { payments: pay } }).forEach((r, i) => { const el = document.querySelector(`[data-amt="${i}"]`); if (el) el.textContent = money(r.amount); });
+    const sum = pay.reduce((s, p) => s + (+p.percent || 0), 0), ok = Math.abs(sum - 100) < 0.005, ps = $('#psum');
+    if (ps) { ps.textContent = `Total ${r2(sum)}% ${ok ? '✓' : '— must add up to 100%'}`; ps.className = 'num' + (ok ? '' : ' neg'); }
+  }
+  function payPaint() {
+    if (type !== 'invoice') return;
+    $('#pwrap').hidden = mode !== 'split'; $('#pmode').value = mode;
+    $('#pays').innerHTML = pay.map((p, i) => `<div class="payrow">
+      <label>Description<input data-p="${i}" data-k="label" maxlength="60" value="${esc(p.label)}" ${p.paid ? 'disabled' : ''}></label>
+      <label>%<input data-p="${i}" data-k="percent" inputmode="decimal" autocomplete="off" maxlength="6" value="${esc(p.percent)}" ${p.paid ? 'disabled' : ''}></label>
+      <label>Due date<input type="date" data-p="${i}" data-k="due" min="${DMIN}" max="${DMAX}" value="${esc(p.due)}" ${p.paid ? 'disabled' : ''}></label>
+      <span class="amt" data-amt="${i}"></span>
+      ${p.paid ? '<span class="muted">Paid</span>' : `<button type="button" class="danger" data-prm="${i}" aria-label="Remove instalment">✕</button>`}</div>`).join('');
+    const de = dueEl();
+    if (mode === 'split') { de.value = lastDue(); de.disabled = true; } else de.disabled = false;
+    payAmounts();
+  }
+  const totals = () => { if (!agr) $('#totals').innerHTML = `<b>Total ${money(calc(items).total)}</b>`; payAmounts(); };
   const paint = () => {
     const inp = (i, k, label, t = 'text', extra = '') => k === 'rate'
       ? `<label>${label}<input data-i="${i}" data-k="rate" inputmode="decimal" autocomplete="off" placeholder="0.00" maxlength="15" value="${items[i].rate ? esc(fmtNum(items[i].rate)) : ''}"></label>`
@@ -366,6 +421,32 @@ async function edit(v, type, id, cid, qid) {
     $('#items').onclick = (e) => { if (e.target.dataset.rm !== undefined) { items.splice(e.target.dataset.rm, 1); if (!items.length) items.push(newItem()); paint(); } };
     $('#add').onclick = () => { items.push(newItem(items.at(-1)?.section || KIND_SECTIONS[kind][0])); paint(); };
     document.querySelector('[name=kind]').onchange = (e) => { kind = e.target.value; fit(); paint(); };
+  }
+  if (type === 'invoice') {
+    const blank = (label, percent, due) => ({ label, percent, due, paid: false, paidDate: '' });
+    $('#pmode').onchange = (e) => {
+      if (e.target.value === 'full' && pay.some((p) => p.paid) && pay.length > 1) { e.target.value = 'split'; return alert('Some instalments are already paid, so this invoice cannot go back to a single payment.'); }
+      mode = e.target.value;
+      if (mode === 'split' && pay.length < 2) pay = [blank('Advance payment', 50, issueEl().value), blank('Balance payment', 50, '')];
+      if (mode === 'full') pay = [blank('Full payment', 100, dueEl().value)];
+      payPaint();
+    };
+    document.querySelectorAll('[data-preset]').forEach((b) => b.onclick = () => {
+      if (pay.some((p) => p.paid)) return alert('Some instalments are already paid, so a preset cannot replace them.');
+      const pcs = b.dataset.preset.split(',').map(Number);
+      pay = pcs.map((pc, i) => blank(i === 0 ? 'Advance payment' : i === pcs.length - 1 ? (pcs.length === 2 ? 'Balance payment' : 'Final payment') : 'Second instalment', pc, i === 0 ? issueEl().value : ''));
+      mode = 'split'; payPaint();
+    });
+    $('#padd').onclick = () => { pay.push(blank('Instalment', 0, '')); payPaint(); };
+    $('#pays').oninput = (e) => {
+      const t = e.target, i = t.dataset.p; if (i === undefined) return;
+      if (t.dataset.k === 'percent') t.value = t.value.replace(/[^\d.]/g, '').replace(/(\..*)\./g, '$1').replace(/(\.\d\d).+/, '$1');
+      pay[i][t.dataset.k] = t.value;
+      if (t.dataset.k === 'due') dueEl().value = lastDue();
+      payAmounts();
+    };
+    $('#pays').onclick = (e) => { const i = e.target.dataset.prm; if (i !== undefined) { pay.splice(+i, 1); payPaint(); } };
+    payPaint();
   }
   if (agr) {
     const cust = document.querySelector('[name=customer_id]'), qsel = $('#qsel'), rate = $('#rate');
@@ -412,6 +493,31 @@ async function edit(v, type, id, cid, qid) {
       row.tax_rate = 0;
       row.data = { ...(d.data || {}), kind };
       row.total = calc(row.items).total;
+      if (type === 'invoice') {
+        const pel = (i, k) => document.querySelector(`[data-p="${i}"][data-k="${k}"]`);
+        let payments;
+        if (mode === 'split') {
+          if (pay.length < 2) return bad('Add at least two instalments, or switch to Full payment.', $('#padd'));
+          let sum = 0;
+          for (const [i, p] of pay.entries()) {
+            const L = `Instalment ${i + 1}`, pc = +p.percent;
+            if (!String(p.label || '').trim()) return bad(`${L}: enter a description.`, pel(i, 'label'));
+            if (!(pc > 0 && pc <= 100)) return bad(`${L}: enter a percentage between 0.01 and 100.`, pel(i, 'percent'));
+            if (!p.due) return bad(`${L}: choose a due date.`, pel(i, 'due'));
+            if (p.due < fd.issue_date) return bad(`${L}: the due date cannot be before the invoice date.`, pel(i, 'due'));
+            sum += pc;
+          }
+          if (Math.abs(sum - 100) > 0.005) return bad(`The percentages add up to ${r2(sum)}%. They must add up to 100%.`, $('#pays'));
+          payments = pay.map((p) => ({ label: p.label.trim(), percent: +p.percent, due: p.due, paid: !!p.paid, paidDate: p.paidDate || '' }));
+        } else {
+          if (!fd.due_date) return bad('Choose the invoice due date.', dueEl());
+          const prev = pay.length === 1 ? pay[0] : {};
+          payments = [{ label: 'Full payment', percent: 100, due: fd.due_date, paid: !!prev.paid, paidDate: prev.paidDate || '' }];
+        }
+        row.data = { ...row.data, payments };
+        row.due_date = payments.map((p) => p.due).sort().at(-1);
+        if (payments.every((p) => p.paid) && row.status !== 'cancelled') row.status = 'paid';
+      }
     }
     try {
       const rid = id ? (await q(sb.from('documents').update(row).eq('id', id)), id) : await nextInsert(row);
@@ -454,11 +560,12 @@ async function view(v, id) {
     <p class="p"><b>Service Provider:</b> ${esc(provider)}${B.pv ? ` (PV: ${esc(B.pv)})` : ''}, hereinafter referred to as the “Service Provider”.</p>
     <p class="p"><b>Client:</b> ${esc(client)}, hereinafter referred to as the “Client”.</p>
     <p class="p">The Service Provider and the Client shall collectively be referred to as the “Parties”.</p>`;
+  const RL = d.type === 'invoice' ? 'Amount' : 'Rate';
   const section = (key) => {
     const rows = d.items.filter((i) => i.section === key);
     if (!rows.length) return '';
     const cm = key === 'colombo';
-    const head = cm ? '<th>Date</th><th>Time</th><th>Activity</th><th>Guests</th><th>Vehicle</th><th class="r">Rate</th><th>Comments</th>' : '<th>Flight</th><th>Airline</th><th>Date</th><th>Time (CMB)</th><th>Guests</th><th>Vehicle</th><th class="r">Rate</th>';
+    const head = (cm ? '<th>Date</th><th>Time</th><th>Activity</th><th>Guests</th><th>Vehicle</th><th class="r">Rate</th><th>Comments</th>' : '<th>Flight</th><th>Airline</th><th>Date</th><th>Time (CMB)</th><th>Guests</th><th>Vehicle</th><th class="r">Rate</th>').replace('>Rate<', `>${RL}<`);
     const row = (i) => cm
       ? `<td>${esc(fdate(i.date))}</td><td>${esc(i.time)}</td><td class="act">${esc(i.activity || [i.pickup, i.dropoff].filter(Boolean).join(' → '))}</td><td>${esc(i.guests)}</td><td>${esc(i.vehicle)}</td><td class="r">${money(i.rate)}</td><td class="act">${esc(i.comments)}</td>`
       : `<td>${esc(i.flight)}</td><td>${esc(i.airline)}</td><td>${esc(fdate(i.date))}</td><td>${esc(i.time)}</td><td>${esc(i.guests)}</td><td>${esc(i.vehicle)}</td><td class="r">${money(i.rate)}</td>`;
@@ -468,6 +575,16 @@ async function view(v, id) {
     <div class="sig"><div><b>FOR THE SERVICE PROVIDER</b><br>${esc(provider)}<br>Name: ${esc(B.signatory || 'Ayushka Weerasinghe')}<br>Date: ${esc(ldate(d.issue_date, '-'))}</div>
     <div><b>FOR THE CLIENT</b><br>${esc(client)}<br>Name: ${esc(c.name)}<br>Designation: ____________________<br>Signature: ____________________<br>Date: ____________________</div></div>`;
   const bank = bankLines.length ? `<h4>Bank Details</h4>${bankLines.map((l) => `<p class="b">${esc(l)}</p>`).join('')}` : '';
+  const sch = schedule(d), paidSum = r2(sch.filter((s) => s.paid).reduce((a, s) => a + s.amount, 0)), balance = r2(Number(d.total) - paidSum);
+  const stamp = d.type !== 'invoice' ? '' : d.status === 'cancelled' ? 'CANCELLED' : balance <= 0.004 ? 'PAID' : paidSum > 0 ? 'PARTLY PAID' : 'UNPAID';
+  const invoiceTail = `<h3 class="sec">PAYMENT SCHEDULE</h3>
+    <table class="rates pay"><thead><tr><th>#</th><th>Description</th><th>Share</th><th class="r">Amount</th><th>Due date</th><th>Status</th></tr></thead><tbody>${sch.map((s, i) =>
+      `<tr><td>${i + 1}</td><td class="act">${esc(s.label)}</td><td>${esc(r2(+s.percent))}%</td><td class="r">${money(s.amount)}</td><td>${esc(s.due ? fdate(s.due) : '—')}</td>
+       <td>${s.paid ? 'Paid' + (s.paidDate ? ' ' + esc(fdate(s.paidDate)) : '') : 'Unpaid'}<span class="noprint"> ${s.paid ? '' : `<input type="date" class="pd" data-pd="${i}" min="${DMIN}" max="${DMAX}" value="${today()}" aria-label="Date paid"> `}<button type="button" class="mini" data-pay="${i}">${s.paid ? 'Mark unpaid' : 'Mark paid'}</button></span></td></tr>`).join('')}</tbody></table>
+    <table class="sumtbl"><tr><td>Invoice total</td><td class="r">${money(d.total)}</td></tr><tr><td>Amount paid</td><td class="r">${money(paidSum)}</td></tr><tr><td><b>Balance due</b></td><td class="r"><b>${money(balance)}</b></td></tr></table>
+    ${bank || '<p class="p err noprint">Bank details are missing: add them in Settings.</p>'}
+    <p class="p">Please quote invoice number <b>${esc(d.number)}</b> as the payment reference. All amounts are in Sri Lankan Rupees (LKR).</p>
+    <p class="p">Services are subject to the agreed Terms &amp; Conditions.</p>`;
   const body = d.type === 'agreement' ? `
     ${parties}
     ${[f.quotation, f.service, f.vehicle, f.pickup, f.dropoff, f.start, f.end, f.deposit].some(Boolean) || (d.total && !d.items.length) ? `<table><tbody>${[['Quotation', f.quotation], ['Service', f.service], ['Vehicle', f.vehicle], ['Pick-up', f.pickup], ['Drop-off', f.dropoff], ['Start', f.start ? fdate(String(f.start).slice(0, 10)) : ''], ['End', f.end ? fdate(String(f.end).slice(0, 10)) : ''], ['Agreed total', d.total && !d.items.length ? money(d.total) : ''], ['Deposit', f.deposit]]
@@ -475,8 +592,8 @@ async function view(v, id) {
     ${d.items.length ? `${['arrival', 'departure', 'colombo'].map(section).join('')}<div class="totalbar"><span>AGREED TOTAL</span><span>${money(d.total, 0)}</span></div>` : ''}
     ${termsHtml(f.terms)}${/\{\{bank\}\}/.test(f.terms || '') ? '' : bank}${signBlock}`
   : `${['arrival', 'departure', 'colombo'].map(section).join('')}
-      <div class="totalbar"><span>TOTAL</span><span>${money(d.total, 0)}</span></div>
-      ${d.type === 'invoice' ? bank : '<p class="b">Rates are per vehicle/run, subject to the attached Terms &amp; Conditions and availability.</p>'}`;
+      <div class="totalbar"><span>${d.type === 'invoice' ? 'INVOICE TOTAL' : 'TOTAL'}</span><span>${money(d.total, 0)}</span></div>
+      ${d.type === 'invoice' ? invoiceTail : '<p class="b">Rates are per vehicle/run, subject to the attached Terms &amp; Conditions and availability.</p>'}`;
 
   v.innerHTML = `<div class="row noprint"><span>
       <button class="primary" id="print">Print / Save PDF</button>
@@ -487,10 +604,25 @@ async function view(v, id) {
       <label style="margin:0">Status <select id="st">${STATUS[d.type].map((s) => `<option ${s === d.status ? 'selected' : ''}>${s}</option>`).join('')}</select></label></div>
     <div class="sheet">
       <div class="row"><div><img src="logo.png" alt="" class="logo-doc"><br><b>${esc(B.name)}</b>${B.subsidiary ? `<br>${esc(B.subsidiary)}${B.pv ? ` (PV ${esc(B.pv)})` : ''}` : ''}<br>${esc(B.address)}<br>${esc([B.phone, B.email].filter(Boolean).join(' · '))}</div>
-        <div style="text-align:right"><h2>${d.type === 'agreement' ? 'TRANSPORTATION SERVICES AGREEMENT' : LABEL[d.type].toUpperCase()}</h2>${esc(d.number)}${d.type === 'agreement' ? '' : '<br>' + esc(KINDS[kindOf(d)])}<br>Date: ${esc(d.issue_date)}${d.due_date ? `<br>${d.type === 'invoice' ? 'Due' : 'Valid until'}: ${esc(d.due_date)}` : ''}</div></div>
+        <div style="text-align:right"><h2>${d.type === 'agreement' ? 'TRANSPORTATION SERVICES AGREEMENT' : LABEL[d.type].toUpperCase()}</h2>${d.type === 'invoice'
+          ? `${esc(d.number)}<br>Invoice date: ${esc(fdate(d.issue_date))}<br>Due date: ${esc(d.due_date ? fdate(d.due_date) : '—')}${f.quotation ? `<br>Ref: ${esc(f.quotation)}` : ''}<br><b class="stamp ${stamp === 'PAID' ? 'ok' : ''}">${stamp}</b>`
+          : `${esc(d.number)}${d.type === 'agreement' ? '' : '<br>' + esc(KINDS[kindOf(d)])}<br>Date: ${esc(d.issue_date)}${d.due_date ? `<br>Valid until: ${esc(d.due_date)}` : ''}`}</div></div>
       ${d.type === 'agreement' ? '' : `<p><b>Bill to:</b><br>${esc(c.name)}<br>${esc(c.address)}<br>${esc(c.phone)} ${esc(c.email)}</p>`}
       ${body}${d.notes ? `<p><b>Notes:</b> ${esc(d.notes)}</p>` : ''}</div>`;
   $('#print').onclick = () => print();
+  if (d.type === 'invoice') v.querySelectorAll('[data-pay]').forEach((b) => b.onclick = async () => {
+    try {
+      const i = +b.dataset.pay, was = sch[i].paid;
+      const pays = (d.data?.payments?.length ? d.data.payments : [{ label: 'Full payment', percent: 100, due: d.due_date || '', paid: false, paidDate: '' }]).map((x) => ({ ...x }));
+      if (d.status === 'paid' && was) pays.forEach((p, k) => { if (k !== i && !p.paid) { p.paid = true; p.paidDate = p.paidDate || d.issue_date; } }); // old 'paid' invoice: keep the others paid
+      pays[i].paid = !was;
+      pays[i].paidDate = was ? '' : (v.querySelector(`[data-pd="${i}"]`)?.value || today());
+      const all = pays.every((p) => p.paid);
+      const status = d.status === 'cancelled' ? d.status : all ? 'paid' : d.status === 'paid' ? 'sent' : d.status;
+      await q(sb.from('documents').update({ data: { ...(d.data || {}), payments: pays }, status }).eq('id', id));
+      route();
+    } catch (err) { alert(err.message); }
+  });
   $('#st').onchange = async (e) => { try { await q(sb.from('documents').update({ status: e.target.value }).eq('id', id)); } catch (err) { alert(err.message); } };
   $('#del').onclick = async () => {
     if (!confirm(`Permanently delete ${d.number}?`)) return;
@@ -499,7 +631,7 @@ async function view(v, id) {
   if (d.type === 'quotation') $('#conv').onclick = async () => {
     try {
       const { id: _i, number: _n, created_at: _c, customers: _cu, ...rest } = d;
-      const nid = await nextInsert({ ...rest, type: 'invoice', status: 'draft', issue_date: today(), due_date: null });
+      const nid = await nextInsert({ ...rest, type: 'invoice', status: 'draft', issue_date: today(), due_date: today(), data: { ...(rest.data || {}), quotation: d.number } });
       location.hash = `#/view/${nid}`;
     } catch (err) { alert(err.message); }
   };
