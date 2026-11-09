@@ -51,7 +51,9 @@ async function boot() {
   const { data: { session } } = await sb.auth.getSession();
   show(!!session);
   if (session) route();
-  sb.auth.onAuthStateChange((ev) => { if (ev === 'SIGNED_IN') { show(true); route(); } if (ev === 'SIGNED_OUT') show(false); });
+  // The auth library re-fires SIGNED_IN every time the tab regains focus. Only react to a real sign-in
+  // (app still hidden), otherwise the page re-renders and wipes whatever is typed in a form.
+  sb.auth.onAuthStateChange((ev) => { if (ev === 'SIGNED_IN' && $('#app').hidden) { show(true); route(); } if (ev === 'SIGNED_OUT') show(false); });
 }
 $('#loginForm').onsubmit = async (e) => {
   e.preventDefault();
