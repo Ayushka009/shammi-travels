@@ -552,6 +552,44 @@ async function edit(v, type, id, cid, qid) {
   };
 }
 
+/* ---------- direct PDF download (no print dialog) ---------- */
+// html2pdf.js 0.10.2 (html2canvas + jsPDF), loaded only when you click Download PDF; pinned with the hash cdnjs publishes.
+const PDF_LIB = { src: 'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.2/html2pdf.bundle.min.js', integrity: 'sha512-MpDFIChbcXl2QgipQrt1VcPHMldRILetapBl5MPCA9Y8r7qvlwx1/Mc9hNTzY+kS5kX6PdoDq41ws1HiVNLdZA==' };
+let pdfLib = null;
+const loadPdfLib = () => pdfLib ||= new Promise((resolve, reject) => {
+  if (window.html2pdf) return resolve(window.html2pdf);
+  const s = document.createElement('script');
+  Object.assign(s, { src: PDF_LIB.src, integrity: PDF_LIB.integrity, crossOrigin: 'anonymous' });
+  s.onload = () => resolve(window.html2pdf);
+  s.onerror = () => { pdfLib = null; reject(new Error('Could not load the PDF tool. Check your internet connection and try again.')); };
+  document.head.appendChild(s);
+});
+
+// Page breaks for the PDF: the PDF tool slices one tall image at fixed heights and drifts a few pixels per page, so it can cut a
+// line in half. Instead, measure every block and push any block that would cross a page boundary down to the next page.
+// Headings (and table header rows) move together with the block that follows them.
+const A4_PAGE_PX = Math.floor(716 * 2 * 273 / 190) / 2; // = 1028.5: the tool's exact page height in CSS px for a 716px-wide capture at scale 2 (A4, 12mm top/bottom margins)
+const paginateForPdf = (root, pageH = A4_PAGE_PX) => {
+  const units = [...root.querySelectorAll('tr, p, h3, h4, .sig, .totalbar, table.sumtbl, .logo-doc')].filter((u) => !u.closest('table.sumtbl') || u.matches('table.sumtbl'));
+  const isHead = (u, next) => u.matches('h3, h4') || (u.matches('tr') && u.parentElement.tagName === 'THEAD') || (u.matches('p') && !!next && next.matches('.sig')); // headings, table header rows and the line above the signature boxes stick to what follows
+  const base = () => root.getBoundingClientRect().top;
+  units.forEach((u, i) => {
+    let last = u, k = i;
+    while (isHead(units[k], units[k + 1]) && units[k + 1]) { k++; last = units[k]; }      // keep a heading with what follows (through a table header row)
+    const top = u.getBoundingClientRect().top - base(), bottom = last.getBoundingClientRect().bottom - base();
+    const page = Math.floor(top / pageH);
+    if (bottom > (page + 1) * pageH - 0.75 && bottom - top <= pageH) {
+      const pad = (page + 1) * pageH - top;
+      if (u.matches('tr')) {
+        const tr = document.createElement('tr'), td = document.createElement('td');
+        td.colSpan = 99; td.style.cssText = `height:${pad}px;padding:0;border:0`; tr.appendChild(td); u.parentElement.insertBefore(tr, u);
+      } else {
+        const sp = document.createElement('div'); sp.style.height = `${pad}px`; u.parentElement.insertBefore(sp, u);
+      }
+    }
+  });
+};
+
 /* ---------- view / print ---------- */
 async function view(v, id) {
   const d = await q(sb.from('documents').select('*, customers(*)').eq('id', id).single());
@@ -627,7 +665,8 @@ async function view(v, id) {
       ${d.type === 'invoice' ? invoiceTail : '<p class="b">Rates are per vehicle/run, subject to the attached Terms &amp; Conditions and availability.</p>'}`;
 
   v.innerHTML = `<div class="row noprint"><span>
-      <button class="primary" id="print">Print / Save PDF</button>
+      <button class="primary" id="pdf">Download PDF</button>
+      <button id="print">Print</button>
       <a href="#/edit/${d.type}/${d.id}"><button>Edit</button></a>
       <a href="#/customer/${d.customer_id}"><button>Customer</button></a>
       ${d.type === 'quotation' ? `<button id="conv">Convert to invoice</button> <a href="#/edit/agreement/-/${d.customer_id}/${d.id}"><button>Create agreement</button></a>` : ''}
@@ -641,6 +680,40 @@ async function view(v, id) {
       ${d.type === 'agreement' ? '' : `<p><b>Bill to:</b><br>${esc(c.name)}<br>${esc(c.address)}<br>${esc(c.phone)} ${esc(c.email)}</p>`}
       ${body}${d.notes ? `<p><b>Notes:</b> ${esc(d.notes)}</p>` : ''}</div>`;
   $('#print').onclick = () => print();
+  // file name like "Invoice - Curtin UNI.pdf" (agreements use the client organisation when it is filled in)
+  const pdfName = () => `${(d.type === 'agreement' ? 'Agreement' : LABEL[d.type])} - ${d.type === 'agreement' ? (f.company || c.name) : c.name}`.replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100) + '.pdf';
+  $('#pdf').onclick = async (e) => {
+    const b = e.currentTarget, label = b.textContent;
+    b.disabled = true; b.textContent = 'Preparing PDF…';
+    let box, cover;
+    const scroll = [window.scrollX, window.scrollY];
+    try {
+      const html2pdf = await loadPdfLib();
+      // render a fixed-width copy (716px = A4 minus 10mm margins at 96dpi, the tool does not shrink content) so the PDF looks the same on a phone as on a desktop, without the on-screen-only buttons.
+      // It sits at the top-left (the renderer clips anything far off-screen) under a cover that hides it from view.
+      window.scrollTo(0, 0);
+      cover = document.createElement('div');
+      cover.style.cssText = 'position:fixed;inset:0;z-index:10001;background:var(--bg,#fff);display:grid;place-items:center;font:600 16px system-ui';
+      cover.textContent = 'Preparing PDF…'; document.body.appendChild(cover);
+      box = document.createElement('div');
+      box.style.cssText = 'position:absolute;left:0;top:0;z-index:10000;width:716px;background:#fff';
+      const copy = document.querySelector('.sheet').cloneNode(true);
+      copy.style.cssText = 'width:716px;overflow:visible;border:0;padding:0';
+      copy.querySelectorAll('.noprint').forEach((x) => x.remove());
+      box.appendChild(copy); document.body.appendChild(box);
+      const worker = html2pdf().set({
+        margin: [12, 10, 12, 10], filename: pdfName(),
+        image: { type: 'jpeg', quality: 0.92 }, html2canvas: { scale: 2, useCORS: true, backgroundColor: '#fff' },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
+        pagebreak: { mode: ['css'] }, // breaks are placed by paginateForPdf
+      }).from(copy);
+      // the tool renders its own copy; its width (and so its page height) can differ by a few px, so measure that one
+      const container = await worker.toContainer().get('container');
+      paginateForPdf(container, Math.floor(Math.round(container.getBoundingClientRect().width * 2) * 273 / 190) / 2);
+      await worker.toCanvas().toPdf().save();
+    } catch (err) { alert(err.message || 'Could not create the PDF.'); }
+    finally { box?.remove(); cover?.remove(); window.scrollTo(...scroll); b.disabled = false; b.textContent = label; }
+  };
   if (d.type === 'invoice') v.querySelectorAll('[data-pay]').forEach((b) => b.onclick = async () => {
     try {
       const i = +b.dataset.pay, was = sch[i].paid;
