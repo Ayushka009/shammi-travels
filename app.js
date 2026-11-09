@@ -577,6 +577,11 @@ async function view(v, id) {
   const bank = bankLines.length ? `<h4>Bank Details</h4>${bankLines.map((l) => `<p class="b">${esc(l)}</p>`).join('')}` : '';
   const sch = schedule(d), paidSum = r2(sch.filter((s) => s.paid).reduce((a, s) => a + s.amount, 0)), balance = r2(Number(d.total) - paidSum);
   const stamp = d.type !== 'invoice' ? '' : d.status === 'cancelled' ? 'CANCELLED' : balance <= 0.004 ? 'PAID' : paidSum > 0 ? 'PARTLY PAID' : 'UNPAID';
+  // invoices show the total only; the line-by-line breakdown stays on the quotation
+  const dates = d.items.map((i) => i.date).filter(Boolean).sort();
+  const range = dates.length ? (dates[0] === dates.at(-1) ? fdate(dates[0]) : `${fdate(dates[0])} – ${fdate(dates.at(-1))}`) : '';
+  const invoiceSummary = `<table class="rates"><thead><tr><th style="text-align:left">Description</th><th class="r">Amount</th></tr></thead><tbody><tr>
+    <td class="act" style="font-size:15px">Transportation services${f.quotation ? ` as per quotation ${esc(f.quotation)}` : ''}${range ? `<br><span style="font-size:13px">Service dates: ${esc(range)}</span>` : ''}</td><td class="r">${money(d.total)}</td></tr></tbody></table>`;
   const invoiceTail = `<h3 class="sec">PAYMENT SCHEDULE</h3>
     <table class="rates pay"><thead><tr><th>#</th><th>Description</th><th>Share</th><th class="r">Amount</th><th>Due date</th><th>Status</th></tr></thead><tbody>${sch.map((s, i) =>
       `<tr><td>${i + 1}</td><td class="act">${esc(s.label)}</td><td>${esc(r2(+s.percent))}%</td><td class="r">${money(s.amount)}</td><td>${esc(s.due ? fdate(s.due) : '—')}</td>
@@ -591,7 +596,7 @@ async function view(v, id) {
       .filter(([, x]) => x).map(([k, x]) => `<tr><th>${k}</th><td>${esc(x)}</td></tr>`).join('')}</tbody></table>` : ''}
     ${d.items.length ? `${['arrival', 'departure', 'colombo'].map(section).join('')}<div class="totalbar"><span>AGREED TOTAL</span><span>${money(d.total, 0)}</span></div>` : ''}
     ${termsHtml(f.terms)}${/\{\{bank\}\}/.test(f.terms || '') ? '' : bank}${signBlock}`
-  : `${['arrival', 'departure', 'colombo'].map(section).join('')}
+  : `${d.type === 'invoice' ? invoiceSummary : ['arrival', 'departure', 'colombo'].map(section).join('')}
       <div class="totalbar"><span>${d.type === 'invoice' ? 'INVOICE TOTAL' : 'TOTAL'}</span><span>${money(d.total, 0)}</span></div>
       ${d.type === 'invoice' ? invoiceTail : '<p class="b">Rates are per vehicle/run, subject to the attached Terms &amp; Conditions and availability.</p>'}`;
 
