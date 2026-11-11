@@ -96,12 +96,12 @@ async function loadSettings() {
 async function route() {
   if (!sb) return;
   const [page = 'dashboard', a, b, c, e5] = location.hash.replace(/^#\//, '').split('/');
-  document.querySelectorAll('nav a').forEach((l) => l.classList.toggle('on', l.getAttribute('href') === `#/${page === 'customer' ? 'customers' : page}${page === 'list' ? '/' + a : ''}`));
+  document.querySelectorAll('nav a').forEach((l) => l.classList.toggle('on', l.getAttribute('href') === `#/${page === 'customer' ? 'customers' : page === 'templates' ? 'settings' : page}${page === 'list' ? '/' + a : ''}`));
   const v = $('#view');
   v.innerHTML = '<p class="muted">Loading…</p>';
   try {
     await loadSettings();
-    const fn = { dashboard, customers, customer, list, edit, view, settings, profit, providers }[page] || dashboard;
+    const fn = { dashboard, customers, customer, list, edit, view, settings, profit, providers, templates }[page] || dashboard;
     await fn(v, a, b, c, e5);
   } catch (e) { v.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
@@ -174,7 +174,7 @@ Payments shall be made to:
 /* ---------- settings ---------- */
 async function settings(v) {
   const f = (k, label, attrs = 'maxlength="200"') => `<label>${label}<input name="${k}" value="${esc(S[k])}" ${attrs}></label>`;
-  v.innerHTML = `<h2>Settings</h2><form id="sf" class="card">
+  v.innerHTML = `<h2>Settings</h2><p><a href="#/templates">Message templates</a> (email and WhatsApp drafts for each stage)</p><form id="sf" class="card">
     <p class="muted">Printed on invoices, quotations and agreements. Stored in your database, behind login.</p>
     <div class="grid">${f('name', 'Business name')}${f('address', 'Address')}${f('phone', 'Phone', 'type="tel" pattern="[0-9+ ]{7,20}" maxlength="20" title="7 to 20 characters: digits, + and spaces"')}${f('email', 'Email', 'type="email" maxlength="120"')}${f('signatory', 'Authorized signatory (agreements)')}</div>
     <div class="grid">${f('subsidiary', 'Subsidiary line (printed under the name in every document header)', 'maxlength="120" placeholder="e.g. A subsidiary of …"')}${f('pv', 'Company PV number', 'maxlength="30" pattern="[A-Za-z0-9 ]{3,30}" title="Letters, digits and spaces"')}</div>
@@ -694,6 +694,148 @@ const paginateForPdf = (root, pageH = A4_PAGE_PX) => {
   });
 };
 
+/* ---------- drafts of emails and WhatsApp messages for each stage (nothing is ever sent from here) ---------- */
+// The stages and which documents they apply to live here; the wording lives in the database (Templates page).
+const STAGES = [
+  { key: 'quotation_sent', label: 'Quotation sent', types: ['quotation'] },
+  { key: 'quotation_followup', label: 'Quotation follow-up', types: ['quotation'] },
+  { key: 'quotation_accepted', label: 'Quotation accepted', types: ['quotation'] },
+  { key: 'agreement_sent', label: 'Agreement sent for signature', types: ['agreement'] },
+  { key: 'agreement_signed', label: 'Agreement signed', types: ['agreement'] },
+  { key: 'invoice_sent', label: 'Invoice sent', types: ['invoice'] },
+  { key: 'payment_reminder', label: 'Payment reminder', types: ['invoice'] },
+  { key: 'payment_received', label: 'Payment received', types: ['invoice'] },
+  { key: 'fully_paid', label: 'Fully paid', types: ['invoice'] },
+  { key: 'service_reminder', label: 'Service reminder', types: ['quotation', 'invoice', 'agreement'] },
+  { key: 'thank_you', label: 'Thank you after the service', types: ['invoice', 'agreement'] },
+];
+const MSG_TOKENS = {
+  customer: 'Customer name', organisation: 'Client organisation (agreements) or customer name', business: 'Your business name', subsidiary: 'Subsidiary line from Settings', signatory: 'Authorized signatory', phone: 'Your phone from Settings',
+  number: 'Document number', type: 'Document type', date: 'Document date', due: 'Due date', total: 'Total amount', quotation_ref: 'Quotation reference, e.g. “ (quotation QUO-2026-0001)”',
+  service_dates: 'First to last service date', next_service: 'Next upcoming service line', next_service_line: '“Next service: …” (empty if none)',
+  schedule: 'Payment schedule, one line per instalment', paid: 'Amount paid so far', balance: 'Balance due', next_label: 'Next unpaid instalment: description', next_amount: 'Next unpaid instalment: amount',
+  next_date: 'Next unpaid instalment: due date', next_when: '“is due on …” or “was due on …”', next_line: '“Next payment: … due …” (empty if none)',
+  last_label: 'Latest paid instalment: description', last_amount: 'Latest paid instalment: amount', last_date: 'Latest paid instalment: date', bank: 'Bank details from Settings',
+};
+let TPL = null;
+const loadTemplates = async (force) => { if (!TPL || force) TPL = Object.fromEntries((await q(sb.from('message_templates').select('*'))).map((r) => [r.stage, r])); return TPL; };
+const fillMsg = (text, ctx) => String(text || '').replace(/\{\{(\w+)\}\}/g, (_, k) => ctx[k] ?? '').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+// WhatsApp wants the international number without + or 0: 0766… becomes 94766…
+const waNumber = (p) => { const d = String(p || '').replace(/\D/g, ''); const n = d.startsWith('00') ? d.slice(2) : d.startsWith('0') ? CONFIG.COUNTRY_CODE + d.slice(1) : d; return n.length >= 9 && n.length <= 15 ? n : ''; };
+
+function messageCtx(d, c, f, B, bankLines) {
+  const inv = d.type === 'invoice', sch = inv ? schedule(d) : [];
+  const paidList = sch.filter((s) => s.paid), unpaid = sch.filter((s) => !s.paid);
+  const paid = r2(paidList.reduce((a, s) => a + s.amount, 0)), next = unpaid[0];
+  const last = [...paidList].sort((a, b) => String(a.paidDate).localeCompare(String(b.paidDate))).at(-1);
+  const items = d.items || [], dates = items.map((i) => i.date).filter(Boolean).sort();
+  const up = items.filter((i) => i.date && i.date >= today()).sort((a, b) => `${a.date} ${a.time || ''}`.localeCompare(`${b.date} ${b.time || ''}`))[0];
+  const what = (i) => i.section === 'colombo' ? String(i.activity || '').split('\n')[0] : `${i.section === 'departure' ? 'Departure' : 'Arrival'}${i.flight ? ' ' + i.flight : ''}`;
+  const next_service = up ? `${fdate(up.date)}${up.time ? ', ' + up.time : ''} – ${what(up)}${up.vehicle ? ` (${up.vehicle})` : ''}` : '';
+  return {
+    customer: c.name || '', organisation: f.company || c.name || '', business: B.name || '', subsidiary: B.subsidiary || '', signatory: B.signatory || 'Ayushka Weerasinghe', phone: B.phone || '',
+    number: d.number, type: d.type === 'agreement' ? 'Transportation Services Agreement' : LABEL[d.type], date: fdate(d.issue_date), due: d.due_date ? fdate(d.due_date) : '', total: money(d.total),
+    quotation_ref: f.quotation ? ` (quotation ${f.quotation})` : '',
+    service_dates: !dates.length ? '' : dates[0] === dates.at(-1) ? fdate(dates[0]) : `${fdate(dates[0])} – ${fdate(dates.at(-1))}`,
+    next_service, next_service_line: next_service ? `Next service: ${next_service}` : '',
+    schedule: sch.map((s, i) => `${i + 1}. ${s.label} – ${r2(+s.percent)}% – ${money(s.amount)} – due ${s.due ? fdate(s.due) : '—'}${s.paid ? ' (paid)' : ''}`).join('\n'),
+    paid: inv ? money(paid) : '', balance: inv ? money(r2(Number(d.total) - paid)) : '',
+    next_label: next?.label || '', next_amount: next ? money(next.amount) : '', next_date: next?.due ? fdate(next.due) : '',
+    next_when: next ? (next.due ? `${next.due < today() ? 'was due on' : 'is due on'} ${fdate(next.due)}` : 'is due') : '',
+    next_line: next ? `Next payment: ${next.label} of ${money(next.amount)}${next.due ? ` due ${fdate(next.due)}` : ''}.` : '',
+    last_label: last?.label || '', last_amount: last ? money(last.amount) : '', last_date: last?.paidDate ? fdate(last.paidDate) : '',
+    bank: bankLines.join('\n'),
+    _paid: paid, _hasNext: !!next, _hasPaid: paidList.length > 0, _balance: r2(Number(d.total) - paid),
+  };
+}
+
+async function messagePanel(v, d, c, f, B, bankLines) {
+  const ctx = messageCtx(d, c, f, B, bankLines);
+  const stages = STAGES.filter((s) => s.types.includes(d.type));
+  const ok = (k) => k === 'payment_reminder' ? ctx._hasNext : k === 'payment_received' ? ctx._hasPaid && ctx._hasNext : k === 'fully_paid' ? ctx._balance <= 0.004 : true;
+  const suggest = d.type === 'quotation' ? (d.status === 'accepted' ? 'quotation_accepted' : d.status === 'draft' ? 'quotation_sent' : 'quotation_followup')
+    : d.type === 'agreement' ? (d.status === 'signed' ? 'agreement_signed' : 'agreement_sent')
+    : d.status === 'paid' || ctx._balance <= 0.004 ? 'fully_paid' : d.status === 'draft' ? 'invoice_sent' : ctx._hasPaid ? 'payment_received' : 'payment_reminder';
+  v.insertAdjacentHTML('beforeend', `<div class="card noprint" id="msgs">
+    <div class="row"><h3>Messages to client</h3><a href="#/templates"><button type="button">Edit templates</button></a></div>
+    <p class="muted">These are drafts only. Nothing is sent from here: review the text, then send it from your own email or WhatsApp.</p>
+    <label>Stage <select id="mstage">${stages.map((s) => `<option value="${s.key}" ${ok(s.key) ? '' : 'disabled'} ${s.key === suggest ? 'selected' : ''}>${esc(s.label)}${ok(s.key) ? '' : ' (not applicable yet)'}</option>`).join('')}</select></label>
+    <div id="mdraft"></div></div>`);
+  const tpls = await loadTemplates();
+  const copyText = async (text) => {
+    try { await navigator.clipboard.writeText(text); return true; } catch {
+      const ta = document.createElement('textarea'); ta.value = text; ta.style.cssText = 'position:fixed;opacity:0'; document.body.appendChild(ta); ta.select();
+      let done = false; try { done = document.execCommand('copy'); } catch { /* ignore */ } ta.remove(); return done;
+    }
+  };
+  const draw = () => {
+    const t = tpls[$('#mstage').value], box = $('#mdraft');
+    if (!t) { box.innerHTML = '<p class="muted">No template for this stage yet. Add it under <a href="#/templates">Edit templates</a>.</p>'; return; }
+    box.innerHTML = `<h4>Email</h4><p class="muted">To: ${c.email ? esc(c.email) : 'no email saved for this customer, add the address in your email app'}</p>
+      <label>Subject <input id="msubj" maxlength="200"></label>
+      <label>Message <textarea id="mmail" rows="12"></textarea></label>
+      <p><a class="btnlink primary" id="mmailto">Open in email app</a> <button type="button" data-copy="mmail">Copy message</button> <button type="button" data-copy="msubj">Copy subject</button></p>
+      <p class="muted">The email app cannot attach files from this button: use <b>Download PDF</b> above and attach the file yourself.</p><p id="mwarn" class="err"></p>
+      <h4>WhatsApp</h4><p class="muted">To: ${waNumber(c.phone) ? esc(c.phone) : 'no valid phone saved for this customer, choose the contact in WhatsApp'}</p>
+      <label>Message <textarea id="mwa" rows="7"></textarea></label>
+      <p><a class="btnlink primary" id="mwalink" target="_blank" rel="noopener noreferrer">Open WhatsApp</a> <button type="button" data-copy="mwa">Copy message</button></p>
+      <p class="muted">WhatsApp cannot attach files from this button either: attach the PDF in WhatsApp.</p><p id="mcopied" class="muted" role="status"></p>`;
+    $('#msubj').value = fillMsg(t.subject, ctx); $('#mmail').value = fillMsg(t.email, ctx); $('#mwa').value = fillMsg(t.whatsapp, ctx);
+    const sync = () => {
+      const mail = `mailto:${encodeURIComponent(c.email || '').replace(/%40/g, '@')}?subject=${encodeURIComponent($('#msubj').value)}&body=${encodeURIComponent($('#mmail').value.replace(/\n/g, '\r\n'))}`;
+      $('#mmailto').href = mail;
+      $('#mwarn').textContent = mail.length > 1800 ? 'This message is long and some email apps cut it off. Use Copy message instead.' : '';
+      $('#mwalink').href = `https://wa.me/${waNumber(c.phone)}?text=${encodeURIComponent($('#mwa').value)}`;
+    };
+    ['msubj', 'mmail', 'mwa'].forEach((id) => $('#' + id).addEventListener('input', sync)); sync();
+  };
+  $('#mstage').onchange = draw;
+  $('#msgs').onclick = async (e) => {
+    const id = e.target.dataset?.copy; if (!id) return;
+    $('#mcopied').textContent = (await copyText($('#' + id).value)) ? 'Copied.' : 'Could not copy: select the text and copy it yourself.';
+  };
+  draw();
+}
+
+async function templates(v) {
+  const tpls = await loadTemplates(true);
+  v.innerHTML = `<h2>Message templates</h2>
+    <p class="muted">The wording of the email and WhatsApp drafts for each stage. Placeholders like <code>{{number}}</code> are filled in from the document when you open the draft.</p>
+    <form id="tf" class="card" novalidate>
+      <label>Stage <select name="stage">${STAGES.map((s) => `<option value="${s.key}">${esc(s.label)}${tpls[s.key] ? '' : ' (empty)'}</option>`).join('')}</select></label>
+      <p class="muted" id="tfor"></p>
+      <label>Email subject <input name="subject" maxlength="150"></label>
+      <label>Email message <textarea name="email" rows="14" maxlength="4000"></textarea></label>
+      <label>WhatsApp message <textarea name="whatsapp" rows="8" maxlength="1500"></textarea></label>
+      <p id="terr" class="err" role="alert"></p>
+      <button class="primary">Save template</button> <span id="tok" class="muted" role="status"></span></form>
+    <details class="guide"><summary>Placeholders you can use</summary>
+      <table class="gtbl"><thead><tr><th>Type this</th><th>Filled in with</th></tr></thead><tbody>${Object.entries(MSG_TOKENS).map(([k, t]) => `<tr><td><code>{{${k}}}</code></td><td>${esc(t)}</td></tr>`).join('')}</tbody></table>
+      <p class="muted">Keep WhatsApp messages short. Email apps cut off very long drafts. Only use facts already on the document.</p></details>`;
+  const f = $('#tf');
+  const load = () => {
+    const t = tpls[f.stage.value] || {}, s = STAGES.find((x) => x.key === f.stage.value);
+    f.subject.value = t.subject || ''; f.email.value = t.email || ''; f.whatsapp.value = t.whatsapp || '';
+    $('#tfor').textContent = `Used on: ${s.types.join(', ')} pages.`; $('#terr').textContent = ''; $('#tok').textContent = '';
+  };
+  f.stage.onchange = load; load();
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    const err = $('#terr'); err.textContent = '';
+    const row = { stage: f.stage.value, subject: f.subject.value.trim(), email: f.email.value.trim(), whatsapp: f.whatsapp.value.trim() };
+    if (!row.subject) return (err.textContent = 'Enter the email subject.');
+    if (!row.email) return (err.textContent = 'Enter the email message.');
+    if (!row.whatsapp) return (err.textContent = 'Enter the WhatsApp message.');
+    for (const text of [row.subject, row.email, row.whatsapp]) {
+      const unknown = [...text.matchAll(/\{\{(\w+)\}\}/g)].map((m) => m[1]).filter((k) => !(k in MSG_TOKENS));
+      if (unknown.length) return (err.textContent = `Unknown placeholder: {{${unknown[0]}}}. See “Placeholders you can use”.`);
+      if ((text.match(/\{\{/g) || []).length !== (text.match(/\}\}/g) || []).length || /\{\{(?!\w+\}\})/.test(text)) return (err.textContent = 'A placeholder is not written correctly: it must look like {{number}}.');
+    }
+    try { await q(sb.from('message_templates').upsert({ ...row, updated_at: new Date().toISOString() })); TPL = null; $('#tok').textContent = 'Saved.'; }
+    catch (e2) { err.textContent = e2.message; }
+  };
+}
+
 /* ---------- view / print ---------- */
 async function view(v, id) {
   const d = await q(sb.from('documents').select('*, customers(*)').eq('id', id).single());
@@ -836,6 +978,7 @@ async function view(v, id) {
     if (!confirm(`Permanently delete ${d.number}?`)) return;
     try { await q(sb.from('documents').delete().eq('id', id)); location.hash = `#/list/${d.type}`; } catch (err) { alert(err.message); }
   };
+  messagePanel(v, d, c, f, B, bankLines).catch((err) => { v.insertAdjacentHTML('beforeend', `<p class="err noprint">Could not load the message drafts: ${esc(err.message)}</p>`); });
   if (d.type === 'quotation') $('#conv').onclick = async () => {
     try {
       const { id: _i, number: _n, created_at: _c, customers: _cu, ...rest } = d;

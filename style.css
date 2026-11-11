@@ -104,3 +104,7 @@ table.gtbl th,table.gtbl td{border-bottom:1px solid var(--line);padding:6px;text
 
 td.pnote{font-size:13px;max-width:340px;white-space:pre-line}
 .rf{margin-top:8px}
+
+a.btnlink{display:inline-flex;align-items:center;min-height:40px;padding:0 14px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink);text-decoration:none;cursor:pointer}
+a.btnlink.primary{background:var(--brand);border-color:var(--brand);color:#fff}
+#msgs h4{margin:14px 0 4px}

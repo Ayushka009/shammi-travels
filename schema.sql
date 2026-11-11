@@ -63,3 +63,12 @@ alter table service_providers enable row level security;
 alter table provider_rates enable row level security;
 create policy "auth only" on service_providers for all to authenticated using (true) with check (true);
 create policy "auth only" on provider_rates for all to authenticated using (true) with check (true);
+
+-- Email / WhatsApp draft wording for each stage (edited on the Message templates page)
+create table message_templates (
+  stage text primary key,
+  subject text, email text, whatsapp text,
+  updated_at timestamptz default now()
+);
+alter table message_templates enable row level security;
+create policy "auth only" on message_templates for all to authenticated using (true) with check (true);
