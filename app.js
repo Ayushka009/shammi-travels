@@ -746,20 +746,24 @@ function messageCtx(d, c, f, B, bankLines) {
     last_label: last?.label || '', last_amount: last ? money(last.amount) : '', last_date: last?.paidDate ? fdate(last.paidDate) : '',
     bank: bankLines.join('\n'),
     _paid: paid, _hasNext: !!next, _hasPaid: paidList.length > 0, _balance: r2(Number(d.total) - paid),
+    _hasUpcoming: !!up, _ended: dates.length > 0 && dates.at(-1) < today(),
   };
 }
 
 async function messagePanel(v, d, c, f, B, bankLines) {
   const ctx = messageCtx(d, c, f, B, bankLines);
   const stages = STAGES.filter((s) => s.types.includes(d.type));
-  const ok = (k) => k === 'payment_reminder' ? ctx._hasNext : k === 'payment_received' ? ctx._hasPaid && ctx._hasNext : k === 'fully_paid' ? ctx._balance <= 0.004 : true;
+  const dead = d.status === 'cancelled' || d.status === 'rejected';   // nothing to say to the client about these
+  const ok = (k) => dead ? false : k === 'payment_reminder' ? ctx._hasNext : k === 'payment_received' ? ctx._hasPaid && ctx._hasNext : k === 'fully_paid' ? ctx._balance <= 0.004
+    : k === 'service_reminder' ? ctx._hasUpcoming : k === 'thank_you' ? ctx._ended : true;
   const suggest = d.type === 'quotation' ? (d.status === 'accepted' ? 'quotation_accepted' : d.status === 'draft' ? 'quotation_sent' : 'quotation_followup')
     : d.type === 'agreement' ? (d.status === 'signed' ? 'agreement_signed' : 'agreement_sent')
     : d.status === 'paid' || ctx._balance <= 0.004 ? 'fully_paid' : d.status === 'draft' ? 'invoice_sent' : ctx._hasPaid ? 'payment_received' : 'payment_reminder';
+  const pick = ok(suggest) ? suggest : stages.find((s) => ok(s.key))?.key;
   v.insertAdjacentHTML('beforeend', `<div class="card noprint" id="msgs">
     <div class="row"><h3>Messages to client</h3><a href="#/templates"><button type="button">Edit templates</button></a></div>
     <p class="muted">These are drafts only. Nothing is sent from here: review the text, then send it from your own email or WhatsApp.</p>
-    <label>Stage <select id="mstage">${stages.map((s) => `<option value="${s.key}" ${ok(s.key) ? '' : 'disabled'} ${s.key === suggest ? 'selected' : ''}>${esc(s.label)}${ok(s.key) ? '' : ' (not applicable yet)'}</option>`).join('')}</select></label>
+    <label>Stage <select id="mstage">${stages.map((s) => `<option value="${s.key}" ${ok(s.key) ? '' : 'disabled'} ${s.key === pick ? 'selected' : ''}>${esc(s.label)}${ok(s.key) ? '' : ' (not applicable yet)'}</option>`).join('')}</select></label>
     <div id="mdraft"></div></div>`);
   const tpls = await loadTemplates();
   const copyText = async (text) => {
@@ -770,6 +774,7 @@ async function messagePanel(v, d, c, f, B, bankLines) {
   };
   const draw = () => {
     const t = tpls[$('#mstage').value], box = $('#mdraft');
+    if ($('#mstage').selectedOptions[0]?.disabled || !pick) { box.innerHTML = `<p class="muted">${dead ? `This document is ${d.status}, so no messages are offered.` : 'Choose a stage that applies to this document right now.'}</p>`; return; }
     if (!t) { box.innerHTML = '<p class="muted">No template for this stage yet. Add it under <a href="#/templates">Edit templates</a>.</p>'; return; }
     box.innerHTML = `<h4>Email</h4><p class="muted">To: ${c.email ? esc(c.email) : 'no email saved for this customer, add the address in your email app'}</p>
       <label>Subject <input id="msubj" maxlength="200"></label>
