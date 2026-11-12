@@ -84,7 +84,7 @@ $('#loginForm').onsubmit = async (e) => {
 $('#logout').onclick = () => sb.auth.signOut();
 
 /* ---------- router ---------- */
-let S = { name: 'Shammi Travels', address: '', phone: '', email: '', signatory: '', bank: '', subsidiary: '', pv: '', terms: '' };
+let S = { name: 'Shammi Travels', address: '', phone: '', email: '', signatory: '', bank: '', subsidiary: '', pv: '', terms: '', discord_webhook: '' };
 let settingsLoaded = false;
 async function loadSettings() {
   if (settingsLoaded) return;
@@ -101,7 +101,7 @@ async function route() {
   v.innerHTML = '<p class="muted">Loading…</p>';
   try {
     await loadSettings();
-    const fn = { dashboard, customers, customer, list, edit, view, settings, profit, providers, templates }[page] || dashboard;
+    const fn = { dashboard, customers, customer, list, edit, view, settings, profit, providers, templates, schedule: scheduleView }[page] || dashboard;
     await fn(v, a, b, c, e5);
   } catch (e) { v.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
@@ -179,10 +179,18 @@ async function settings(v) {
     <div class="grid">${f('name', 'Business name')}${f('address', 'Address')}${f('phone', 'Phone', 'type="tel" pattern="[0-9+ ]{7,20}" maxlength="20" title="7 to 20 characters: digits, + and spaces"')}${f('email', 'Email', 'type="email" maxlength="120"')}${f('signatory', 'Authorized signatory (agreements)')}</div>
     <div class="grid">${f('subsidiary', 'Subsidiary line (printed under the name in every document header)', 'maxlength="120" placeholder="e.g. A subsidiary of …"')}${f('pv', 'Company PV number', 'maxlength="30" pattern="[A-Za-z0-9 ]{3,30}" title="Letters, digits and spaces"')}</div>
     <label>Bank details (one line each, e.g. “Bank: …”, “Account Number: …”)<textarea name="bank" rows="7" maxlength="1000">${esc(S.bank)}</textarea></label>
+    <label>Discord webhook URL (booking reminders are posted to this channel)
+      <input name="discord_webhook" type="url" autocomplete="off" maxlength="300" pattern="https://(discord|discordapp)\\.com/api/webhooks/.+" title="A Discord webhook link: https://discord.com/api/webhooks/…" value="${esc(S.discord_webhook)}" placeholder="https://discord.com/api/webhooks/…"></label>
+    <p class="muted">Posts today's services at 7:00 am, tomorrow's at 6:00 pm, payments due, and an alert 3 hours before each flight (Sri Lanka time). Save, then <button type="button" id="dtest">Send a test to Discord</button> <span id="dok" role="status"></span></p>
     <label>Standard agreement terms
       <textarea name="terms" rows="14" maxlength="20000">${esc(S.terms)}</textarea></label>
     ${termsGuide}
     <button class="primary">Save settings</button> <span id="ok" class="muted" role="status"></span></form>`;
+  $('#dtest').onclick = async () => {
+    $('#dok').textContent = 'Sending…';
+    try { const r = await q(sb.rpc('discord_test')); $('#dok').textContent = r === 'sent' ? 'Sent. Check the Discord channel.' : 'No valid webhook is saved yet: paste the link above and Save settings first.'; }
+    catch (err) { $('#dok').textContent = `Could not send: ${err.message}`; }
+  };
   $('#sf').onsubmit = async (e) => {
     e.preventDefault();
     try {
@@ -393,6 +401,76 @@ async function providers(v) {
         route();
       }
     } catch (err) { alert(err.message); }
+  };
+}
+
+/* ---------- schedule: every service line of the accepted quotations, with the vehicle and driver assigned to it ---------- */
+// The assignment is stored on the quotation line itself (like its cost), as `assign`.
+const ASTATUS = ['unassigned', 'assigned', 'confirmed', 'on the way', 'completed', 'cancelled'];
+const lineTitle = (i) => i.section === 'colombo' ? String(i.activity || [i.pickup, i.dropoff].filter(Boolean).join(' → ') || 'Traveling').split('\n')[0] : `${i.section === 'departure' ? 'Departure' : 'Arrival'} ${i.flight || ''}`.trim();
+const lineKey = (i) => [i.section, i.date, i.time, i.flight, i.activity].map((x) => x || '').join('|');
+const flightUrl = (i) => { const c = String(i.flight || '').replace(/\s+/g, '').toLowerCase(); return i.section !== 'colombo' && /^[a-z0-9]{2}\d{1,4}[a-z]?$/.test(c) ? `https://www.flightradar24.com/data/flights/${c}` : ''; };
+// "23:30", "6:45pm", "9.30 AM", "12. 00 Noon" -> minutes after midnight (unknown times sort last)
+const timeMin = (t) => { const m = String(t || '').match(/(\d{1,2})\s*[:.]\s*(\d{2})\s*(am|pm)?/i); if (!m) return 1440; let h = +m[1]; const ap = (m[3] || '').toLowerCase(); if (ap === 'pm' && h < 12) h += 12; if (ap === 'am' && h === 12) h = 0; return h * 60 + +m[2]; };
+
+async function scheduleView(v, mode) {
+  const past = mode === 'past';
+  const [docs, provs] = await Promise.all([
+    q(sb.from('documents').select('id,number,customer_id,items,customers(name)').eq('type', 'quotation').eq('status', 'accepted')),
+    q(sb.from('service_providers').select('name').order('name')),
+  ]);
+  const lines = docs.flatMap((d) => (d.items || []).map((it, idx) => ({ d, it, idx, a: it.assign || {} })))
+    .filter((l) => l.it.date && (past ? l.it.date < today() : l.it.date >= today()))
+    .sort((x, y) => (past ? -1 : 1) * x.it.date.localeCompare(y.it.date) || timeMin(x.it.time) - timeMin(y.it.time));
+  const st = (l) => l.a.status || (l.a.driver || l.a.vehicle_no ? 'assigned' : 'unassigned');
+  const open = lines.filter((l) => st(l) === 'unassigned').length;
+  const fld = (name, label, val, attrs = '') => `<label>${label}<input name="${name}" value="${esc(val)}" ${attrs}></label>`;
+  const card = (l) => {
+    const { it, a, d } = l, s = st(l), fu = flightUrl(it), tel = String(a.driver_phone || '').replace(/[^\d+]/g, '');
+    const who = [a.provider, a.vehicle_no, a.driver, a.driver_phone].filter(Boolean).join(' · ');
+    return `<div class="card trip">
+      <div class="row"><b>${esc(it.time || 'Time not set')} · ${esc(lineTitle(it))}</b><span class="badge s-${s.replace(/ /g, '')}">${esc(s)}</span></div>
+      <p class="muted">${esc(it.guests)} guests · ${esc(it.vehicle || 'vehicle not chosen')} · <a href="#/customer/${d.customer_id}">${esc(d.customers?.name)}</a> · <a href="#/view/${d.id}">${esc(d.number)}</a></p>
+      <p>${who ? esc(who) : '<span class="neg">No vehicle assigned yet</span>'}${a.note ? `<br><span class="muted">${esc(a.note)}</span>` : ''}</p>
+      <p class="tripbtns">${fu ? `<a class="btnlink" href="${fu}" target="_blank" rel="noopener noreferrer">Track flight ${esc(it.flight)}</a>` : ''}
+        ${tel ? `<a class="btnlink" href="tel:${esc(tel)}">Call driver</a>` : ''}
+        ${a.track_url ? `<a class="btnlink" href="${esc(a.track_url)}" target="_blank" rel="noopener noreferrer">Track vehicle</a>` : ''}</p>
+      <details class="guide"><summary>${who ? 'Change assignment' : 'Assign a vehicle'}</summary>
+        <form class="af" data-doc="${d.id}" data-idx="${l.idx}" data-key="${esc(lineKey(it))}" novalidate><div class="grid">
+          ${fld('provider', 'Provider', a.provider, 'list="plist" maxlength="120" autocomplete="off" placeholder="Own vehicle or a provider"')}
+          ${fld('vehicle_no', 'Vehicle number', a.vehicle_no, 'maxlength="20" autocomplete="off" placeholder="e.g. WP CAB-1234"')}
+          ${fld('driver', 'Driver name', a.driver, 'maxlength="80"')}
+          ${fld('driver_phone', 'Driver phone', a.driver_phone, 'type="tel" pattern="[0-9+ ]{7,20}" maxlength="20"')}
+          <label>Status <select name="status">${ASTATUS.map((x) => `<option ${x === s ? 'selected' : ''}>${x}</option>`).join('')}</select></label></div>
+          ${fld('track_url', 'Live location link (the driver\'s Google Maps or WhatsApp live-location share link)', a.track_url, 'type="url" maxlength="300" placeholder="https://maps.app.goo.gl/…"')}
+          ${fld('note', 'Note', a.note, 'maxlength="200"')}
+          <p class="err aerr" role="alert"></p><button class="primary">Save assignment</button></form></details></div>`;
+  };
+  const days = [...new Set(lines.map((l) => l.it.date))];
+  v.innerHTML = `<div class="row"><h2>Schedule</h2><a href="#/schedule${past ? '' : '/past'}"><button>${past ? 'Show upcoming' : 'Show past'}</button></a></div>
+    <datalist id="plist"><option value="Own vehicle">${provs.map((p) => `<option value="${esc(p.name)}">`).join('')}</datalist>
+    <p class="muted">${lines.length} ${past ? 'past' : 'upcoming'} service${lines.length === 1 ? '' : 's'} from accepted quotations${past ? '' : ` · <span class="${open ? 'neg' : ''}">${open} not assigned</span>`}</p>
+    ${days.length ? days.map((day) => `<h3 class="day">${esc(fdate(day))}${day === today() ? ' · Today' : ''}</h3>${lines.filter((l) => l.it.date === day).map(card).join('')}`).join('')
+      : `<p class="muted">Nothing ${past ? 'in the past' : 'coming up'}. Services appear here once a quotation is set to accepted.</p>`}`;
+  v.onsubmit = async (e) => {
+    const f = e.target; if (!f.classList.contains('af')) return;
+    e.preventDefault();
+    const err = f.querySelector('.aerr'); err.textContent = '';
+    const a = Object.fromEntries(['provider', 'vehicle_no', 'driver', 'driver_phone', 'track_url', 'status', 'note'].map((k) => [k, f[k].value.trim().replace(/\s+/g, ' ')]));
+    if (a.driver_phone && !f.driver_phone.checkValidity()) return (err.textContent = 'The driver phone must be 7 to 20 characters: digits, + and spaces.');
+    if (a.track_url && !/^https:\/\/[^\s]+$/.test(a.track_url)) return (err.textContent = 'The live location link must start with https://');
+    const filled = a.provider || a.vehicle_no || a.driver || a.driver_phone;
+    if (a.status === 'unassigned' && filled) a.status = 'assigned';
+    if (['assigned', 'confirmed', 'on the way'].includes(a.status) && !filled) return (err.textContent = 'Enter the provider, vehicle number or driver first.');
+    try {
+      const fresh = await q(sb.from('documents').select('items').eq('id', f.dataset.doc).single()), idx = +f.dataset.idx;
+      if (!fresh.items[idx] || lineKey(fresh.items[idx]) !== f.dataset.key) return (err.textContent = 'This quotation was changed in the meantime. Reload the page and try again.');
+      const empty = !filled && !a.track_url && !a.note && a.status === 'unassigned';
+      const { assign: _old, ...rest } = fresh.items[idx];
+      fresh.items[idx] = empty ? rest : { ...rest, assign: a };
+      await q(sb.from('documents').update({ items: fresh.items }).eq('id', f.dataset.doc));
+      route();
+    } catch (e2) { err.textContent = e2.message; }
   };
 }
 
@@ -993,4 +1071,5 @@ async function view(v, id) {
   };
 }
 
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {}); // installable app (PWA)
 boot();

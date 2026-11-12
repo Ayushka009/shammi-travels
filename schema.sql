@@ -72,3 +72,6 @@ create table message_templates (
 );
 alter table message_templates enable row level security;
 create policy "auth only" on message_templates for all to authenticated using (true) with check (true);
+
+-- Discord booking reminders: see reminders.sql (run once in the SQL editor)
+alter table settings add column if not exists discord_webhook text;

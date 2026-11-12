@@ -108,3 +108,29 @@ td.pnote{font-size:13px;max-width:340px;white-space:pre-line}
 a.btnlink{display:inline-flex;align-items:center;min-height:40px;padding:0 14px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink);text-decoration:none;cursor:pointer}
 a.btnlink.primary{background:var(--brand);border-color:var(--brand);color:#fff}
 #msgs h4{margin:14px 0 4px}
+
+/* ---- schedule ---- */
+.badge{font-size:12px;padding:2px 10px;border-radius:999px;border:1px solid var(--line);white-space:nowrap}
+.badge.s-unassigned{color:var(--danger);border-color:var(--danger)}
+.badge.s-confirmed,.badge.s-completed,.badge.s-ontheway{color:var(--brand);border-color:var(--brand)}
+.trip p{margin:6px 0}.tripbtns{display:flex;flex-wrap:wrap;gap:8px}.tripbtns:empty{display:none}
+h3.day{margin:20px 0 8px}
+/* ---- phones ---- */
+html{-webkit-text-size-adjust:100%}
+header{padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right))}
+nav a{display:inline-flex;align-items:center;min-height:40px}
+@media (max-width:760px){
+  header{gap:6px 8px;padding-top:8px;padding-bottom:8px}
+  #logout{margin-left:auto}
+  nav{order:3;flex:0 0 100%;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+  nav::-webkit-scrollbar{display:none}
+  nav a{flex:none;white-space:nowrap}
+  main{padding:10px}
+  .card{padding:12px}
+  .sheet{padding:14px}
+  input,select,textarea{font-size:16px} /* stops iPhones zooming in on focus */
+  .row>span{display:flex;flex-wrap:wrap;gap:6px}
+  .grid{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+  td input.cost{width:110px}
+  .stat b{font-size:19px}
+}
