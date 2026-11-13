@@ -75,3 +75,6 @@ create policy "auth only" on message_templates for all to authenticated using (t
 
 -- Discord booking reminders: see reminders.sql (run once in the SQL editor)
 alter table settings add column if not exists discord_webhook text;
+
+-- Live flight status: see flights.sql (run once in the SQL editor, after reminders.sql)
+alter table settings add column if not exists flight_api_key text;

@@ -1,0 +1,1 @@
+{"trip_driver": {"subject": "", "email": "", "whatsapp": "Hello {{driver}}, trip assignment from {{business}}:\n\n*{{trip_what}}*\n{{trip_details}}\nDate: {{trip_date}}\nTime: {{trip_time}}\nGuests: {{trip_guests}}\nVehicle: {{trip_vehicle}}\nCustomer: {{customer}} {{customer_phone}}\n{{flight_line}}\n{{trip_note_line}}\n\nPlease confirm by replying to this message."}}

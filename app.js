@@ -84,7 +84,7 @@ $('#loginForm').onsubmit = async (e) => {
 $('#logout').onclick = () => sb.auth.signOut();
 
 /* ---------- router ---------- */
-let S = { name: 'Shammi Travels', address: '', phone: '', email: '', signatory: '', bank: '', subsidiary: '', pv: '', terms: '', discord_webhook: '' };
+let S = { name: 'Shammi Travels', address: '', phone: '', email: '', signatory: '', bank: '', subsidiary: '', pv: '', terms: '', discord_webhook: '', flight_api_key: '' };
 let settingsLoaded = false;
 async function loadSettings() {
   if (settingsLoaded) return;
@@ -182,6 +182,9 @@ async function settings(v) {
     <label>Discord webhook URL (booking reminders are posted to this channel)
       <input name="discord_webhook" type="url" autocomplete="off" maxlength="300" pattern="https://(discord|discordapp)\\.com/api/webhooks/.+" title="A Discord webhook link: https://discord.com/api/webhooks/…" value="${esc(S.discord_webhook)}" placeholder="https://discord.com/api/webhooks/…"></label>
     <p class="muted">Posts today's services at 7:00 am, tomorrow's at 6:00 pm, payments due, and an alert 3 hours before each flight (Sri Lanka time). Save, then <button type="button" id="dtest">Send a test to Discord</button> <span id="dok" role="status"></span></p>
+    <label>Flight status API key (AeroDataBox on RapidAPI)
+      <input name="flight_api_key" type="password" autocomplete="off" maxlength="100" pattern="[A-Za-z0-9_\\-]{20,100}" title="The X-RapidAPI-Key value: 20 to 100 letters and digits" value="${esc(S.flight_api_key)}"></label>
+    <p class="muted">Turns on live flight status on the Schedule page and Discord alerts when a flight is delayed, cancelled, landed or departed. Get a key at rapid.aerodatabox.com (the free plan allows about 200 checks a month, roughly 28 flights).</p>
     <label>Standard agreement terms
       <textarea name="terms" rows="14" maxlength="20000">${esc(S.terms)}</textarea></label>
     ${termsGuide}
@@ -415,26 +418,62 @@ const timeMin = (t) => { const m = String(t || '').match(/(\d{1,2})\s*[:.]\s*(\d
 
 async function scheduleView(v, mode) {
   const past = mode === 'past';
-  const [docs, provs] = await Promise.all([
-    q(sb.from('documents').select('id,number,customer_id,items,customers(name)').eq('type', 'quotation').eq('status', 'accepted')),
+  const [docs, provs, flights] = await Promise.all([
+    q(sb.from('documents').select('id,number,customer_id,items,customers(name,phone)').eq('type', 'quotation').eq('status', 'accepted')),
     q(sb.from('service_providers').select('name').order('name')),
+    q(sb.from('flight_status').select('*')),
   ]);
+  const tpls = await loadTemplates().catch(() => ({}));
+  const FS = Object.fromEntries(flights.map((x) => [`${x.flight}|${x.flight_date}|${x.section}`, x]));
+  const hm = (ts) => String(ts || '').slice(11, 16);
+  const flightLine = (it) => {
+    const x = FS[`${String(it.flight || '').replace(/\s+/g, '').toUpperCase()}|${it.date}|${it.section}`];
+    if (!x || (!x.status && !x.error)) return '';
+    if (!x.status) return `<p class="muted">Flight status: ${esc(x.error)}</p>`;
+    const t = x.estimated || x.scheduled, late = t && x.planned ? Math.round((new Date(t) - new Date(x.planned)) / 60000) : 0;
+    const bad = Math.abs(late) >= 15 || /Cancel|Divert/.test(x.status);
+    const bits = [`<b>${esc(x.status.replace(/([a-z])([A-Z])/g, '$1 $2'))}</b>`,
+      t ? `${x.estimated ? (it.section === 'arrival' ? 'expected' : 'departs') : 'scheduled'} ${hm(t)}${t.slice(0, 10) !== it.date ? ` on ${fdate(t.slice(0, 10))}` : ''}${Math.abs(late) >= 5 ? ` (${Math.abs(late)} min ${late > 0 ? 'late' : 'early'})` : ''}` : '',
+      x.terminal ? `Terminal ${esc(x.terminal)}` : '', x.gate ? `Gate ${esc(x.gate)}` : '', x.belt ? `Belt ${esc(x.belt)}` : '',
+      x.checked_at ? `checked ${new Date(x.checked_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''].filter(Boolean);
+    return `<p class="${bad ? 'neg' : ''}">✈ ${bits.join(' · ')}${x.live ? '' : ' <span class="muted">(schedule data only)</span>'}${x.error ? ` <span class="muted">· ${esc(x.error)}</span>` : ''}</p>`;
+  };
   const lines = docs.flatMap((d) => (d.items || []).map((it, idx) => ({ d, it, idx, a: it.assign || {} })))
     .filter((l) => l.it.date && (past ? l.it.date < today() : l.it.date >= today()))
     .sort((x, y) => (past ? -1 : 1) * x.it.date.localeCompare(y.it.date) || timeMin(x.it.time) - timeMin(y.it.time));
   const st = (l) => l.a.status || (l.a.driver || l.a.vehicle_no ? 'assigned' : 'unassigned');
   const open = lines.filter((l) => st(l) === 'unassigned').length;
   const fld = (name, label, val, attrs = '') => `<label>${label}<input name="${name}" value="${esc(val)}" ${attrs}></label>`;
-  const card = (l) => {
+  const tripCtx = (l) => {
+    const { it, a, d } = l, c = d.customers || {}, fu = flightUrl(it);
+    return { customer: c.name || '', business: S.name || '', signatory: S.signatory || 'Ayushka Weerasinghe', phone: S.phone || '', driver: a.driver || '', customer_phone: c.phone || '',
+      trip_what: lineTitle(it), trip_date: fdate(it.date), trip_time: it.time || 'time to be confirmed', trip_guests: String(it.guests ?? ''), trip_vehicle: it.vehicle || '',
+      trip_details: it.section === 'colombo' ? String(it.activity || '') : '',
+      vehicle_line: [it.vehicle && `Vehicle: ${it.vehicle}`, a.vehicle_no].filter(Boolean).join(' ').replace(/^$/, ''), driver_line: a.driver ? `Driver: *${a.driver}*${a.driver_phone ? ` (${a.driver_phone})` : ''}` : '',
+      track_line: a.track_url ? `Live location: ${a.track_url}` : '', flight_line: fu ? `Flight status: ${fu}` : '', trip_note_line: a.note ? `Note: ${a.note}` : '' };
+  };
+  const msgBlock = (l, n) => {
+    const { a, d } = l, c = d.customers || {}, ctx = tripCtx(l), has = !!(a.driver || a.vehicle_no || a.provider);
+    const box = (id, who, tpl, phone, ok) => !tpls[tpl] ? `<p class="muted">No “${esc(who)}” template yet: add it under Settings → Message templates.</p>`
+      : !ok ? `<p class="muted">${who}: assign a vehicle or driver first.</p>`
+      : `<h4>${who}</h4><label>Message<textarea id="${id}" rows="8" data-phone="${esc(waNumber(phone))}">${esc(fillMsg(tpls[tpl].whatsapp, ctx))}</textarea></label>
+         <p class="muted">To: ${waNumber(phone) ? esc(phone) : 'no valid phone saved, choose the contact in WhatsApp'}</p>
+         <p><a class="btnlink primary" data-wa="${id}" target="_blank" rel="noopener noreferrer">Open WhatsApp</a> <button type="button" data-copy="${id}">Copy message</button></p>`;
+    return `<details class="guide"><summary>WhatsApp messages (customer and driver)</summary>${box(`mc-${n}`, 'To the customer', 'trip_customer', c.phone, has)}${box(`md-${n}`, 'To the driver', 'trip_driver', a.driver_phone, has)}
+      <p class="muted">Drafts only: nothing is sent from here.</p></details>`;
+  };
+  const card = (l, n) => {
     const { it, a, d } = l, s = st(l), fu = flightUrl(it), tel = String(a.driver_phone || '').replace(/[^\d+]/g, '');
     const who = [a.provider, a.vehicle_no, a.driver, a.driver_phone].filter(Boolean).join(' · ');
     return `<div class="card trip">
       <div class="row"><b>${esc(it.time || 'Time not set')} · ${esc(lineTitle(it))}</b><span class="badge s-${s.replace(/ /g, '')}">${esc(s)}</span></div>
       <p class="muted">${esc(it.guests)} guests · ${esc(it.vehicle || 'vehicle not chosen')} · <a href="#/customer/${d.customer_id}">${esc(d.customers?.name)}</a> · <a href="#/view/${d.id}">${esc(d.number)}</a></p>
+      ${flightLine(it)}
       <p>${who ? esc(who) : '<span class="neg">No vehicle assigned yet</span>'}${a.note ? `<br><span class="muted">${esc(a.note)}</span>` : ''}</p>
       <p class="tripbtns">${fu ? `<a class="btnlink" href="${fu}" target="_blank" rel="noopener noreferrer">Track flight ${esc(it.flight)}</a>` : ''}
         ${tel ? `<a class="btnlink" href="tel:${esc(tel)}">Call driver</a>` : ''}
         ${a.track_url ? `<a class="btnlink" href="${esc(a.track_url)}" target="_blank" rel="noopener noreferrer">Track vehicle</a>` : ''}</p>
+      ${msgBlock(l, n)}
       <details class="guide"><summary>${who ? 'Change assignment' : 'Assign a vehicle'}</summary>
         <form class="af" data-doc="${d.id}" data-idx="${l.idx}" data-key="${esc(lineKey(it))}" novalidate><div class="grid">
           ${fld('provider', 'Provider', a.provider, 'list="plist" maxlength="120" autocomplete="off" placeholder="Own vehicle or a provider"')}
@@ -447,11 +486,32 @@ async function scheduleView(v, mode) {
           <p class="err aerr" role="alert"></p><button class="primary">Save assignment</button></form></details></div>`;
   };
   const days = [...new Set(lines.map((l) => l.it.date))];
-  v.innerHTML = `<div class="row"><h2>Schedule</h2><a href="#/schedule${past ? '' : '/past'}"><button>${past ? 'Show upcoming' : 'Show past'}</button></a></div>
+  v.innerHTML = `<div class="row"><h2>Schedule</h2><span>${S.flight_api_key && !past ? '<button type="button" id="fnow">Check the next flight now</button> ' : ''}<a href="#/schedule${past ? '' : '/past'}"><button>${past ? 'Show upcoming' : 'Show past'}</button></a></span></div>
+    <p id="fmsg" class="muted" role="status"></p>
     <datalist id="plist"><option value="Own vehicle">${provs.map((p) => `<option value="${esc(p.name)}">`).join('')}</datalist>
     <p class="muted">${lines.length} ${past ? 'past' : 'upcoming'} service${lines.length === 1 ? '' : 's'} from accepted quotations${past ? '' : ` · <span class="${open ? 'neg' : ''}">${open} not assigned</span>`}</p>
-    ${days.length ? days.map((day) => `<h3 class="day">${esc(fdate(day))}${day === today() ? ' · Today' : ''}</h3>${lines.filter((l) => l.it.date === day).map(card).join('')}`).join('')
+    ${days.length ? days.map((day) => `<h3 class="day">${esc(fdate(day))}${day === today() ? ' · Today' : ''}</h3>${lines.filter((l) => l.it.date === day).map((l) => card(l, lines.indexOf(l))).join('')}`).join('')
       : `<p class="muted">Nothing ${past ? 'in the past' : 'coming up'}. Services appear here once a quotation is set to accepted.</p>`}`;
+  const syncWa = (ta) => { const a = v.querySelector(`[data-wa="${ta.id}"]`); if (a) a.href = `https://wa.me/${ta.dataset.phone}?text=${encodeURIComponent(ta.value)}`; };
+  v.querySelectorAll('textarea[data-phone]').forEach((ta) => { syncWa(ta); ta.addEventListener('input', () => syncWa(ta)); });
+  v.addEventListener('click', async (e) => {
+    const id = e.target.dataset?.copy; if (!id) return;
+    const ta = $('#' + id); ta.select();
+    try { await navigator.clipboard.writeText(ta.value); e.target.textContent = 'Copied'; } catch { try { document.execCommand('copy'); e.target.textContent = 'Copied'; } catch { e.target.textContent = 'Select and copy'; } }
+    setTimeout(() => { e.target.textContent = 'Copy message'; }, 1800);
+  });
+  if ($('#fnow')) $('#fnow').onclick = async (e) => {
+    const b = e.currentTarget, msg = $('#fmsg'); b.disabled = true;
+    try {
+      const r = await q(sb.rpc('flight_refresh', { queue: true }));
+      if (r === 'no-key') { msg.textContent = 'No flight API key is saved in Settings.'; b.disabled = false; return; }
+      if (r === 'none') { msg.textContent = 'No flight in the next 24 hours needs a check.'; b.disabled = false; return; }
+      msg.textContent = 'Asking the flight service…';
+      await new Promise((res) => setTimeout(res, 8000));
+      await q(sb.rpc('flight_refresh', { queue: false }));
+      route();
+    } catch (err) { msg.textContent = `Could not check: ${err.message}`; b.disabled = false; }
+  };
   v.onsubmit = async (e) => {
     const f = e.target; if (!f.classList.contains('af')) return;
     e.preventDefault();
@@ -786,6 +846,8 @@ const STAGES = [
   { key: 'fully_paid', label: 'Fully paid', types: ['invoice'] },
   { key: 'service_reminder', label: 'Service reminder', types: ['quotation', 'invoice', 'agreement'] },
   { key: 'thank_you', label: 'Thank you after the service', types: ['invoice', 'agreement'] },
+  { key: 'trip_customer', label: 'Schedule: WhatsApp to the customer (vehicle and driver)', types: ['trip'] },
+  { key: 'trip_driver', label: 'Schedule: WhatsApp to the driver (trip details)', types: ['trip'] },
 ];
 const MSG_TOKENS = {
   customer: 'Customer name', organisation: 'Client organisation (agreements) or customer name', business: 'Your business name', subsidiary: 'Subsidiary line from Settings', signatory: 'Authorized signatory', phone: 'Your phone from Settings',
@@ -793,6 +855,9 @@ const MSG_TOKENS = {
   service_dates: 'First to last service date', next_service: 'Next upcoming service line', next_service_line: '“Next service: …” (empty if none)',
   schedule: 'Payment schedule, one line per instalment', paid: 'Amount paid so far', balance: 'Balance due', next_label: 'Next unpaid instalment: description', next_amount: 'Next unpaid instalment: amount',
   next_date: 'Next unpaid instalment: due date', next_when: '“is due on …” or “was due on …”', next_line: '“Next payment: … due …” (empty if none)',
+  driver: 'Schedule: driver name',
+  trip_what: 'Schedule: the service, e.g. “Arrival SQ 468”', trip_date: 'Schedule: service date', trip_time: 'Schedule: service time', trip_guests: 'Schedule: number of guests', trip_vehicle: 'Schedule: vehicle type on the quotation',
+  trip_details: 'Schedule: full activity text of a traveling line', vehicle_line: 'Schedule: “Vehicle: … number”', driver_line: 'Schedule: “Driver: name (phone)”', track_line: 'Schedule: “Live location: link”', flight_line: 'Schedule: “Flight status: link”', customer_phone: 'Customer phone', trip_note_line: 'Schedule: “Note: …”',
   last_label: 'Latest paid instalment: description', last_amount: 'Latest paid instalment: amount', last_date: 'Latest paid instalment: date', bank: 'Bank details from Settings',
 };
 let TPL = null;
@@ -899,15 +964,16 @@ async function templates(v) {
   const load = () => {
     const t = tpls[f.stage.value] || {}, s = STAGES.find((x) => x.key === f.stage.value);
     f.subject.value = t.subject || ''; f.email.value = t.email || ''; f.whatsapp.value = t.whatsapp || '';
-    $('#tfor').textContent = `Used on: ${s.types.join(', ')} pages.`; $('#terr').textContent = ''; $('#tok').textContent = '';
+    $('#tfor').textContent = s.types[0] === 'trip' ? 'Used on the Schedule page (WhatsApp only; the email boxes are not used).' : `Used on: ${s.types.join(', ')} pages.`; $('#terr').textContent = ''; $('#tok').textContent = '';
   };
   f.stage.onchange = load; load();
   f.onsubmit = async (e) => {
     e.preventDefault();
     const err = $('#terr'); err.textContent = '';
     const row = { stage: f.stage.value, subject: f.subject.value.trim(), email: f.email.value.trim(), whatsapp: f.whatsapp.value.trim() };
-    if (!row.subject) return (err.textContent = 'Enter the email subject.');
-    if (!row.email) return (err.textContent = 'Enter the email message.');
+    const trip = row.stage.startsWith('trip_');   // schedule messages are WhatsApp only
+    if (!trip && !row.subject) return (err.textContent = 'Enter the email subject.');
+    if (!trip && !row.email) return (err.textContent = 'Enter the email message.');
     if (!row.whatsapp) return (err.textContent = 'Enter the WhatsApp message.');
     for (const text of [row.subject, row.email, row.whatsapp]) {
       const unknown = [...text.matchAll(/\{\{(\w+)\}\}/g)].map((m) => m[1]).filter((k) => !(k in MSG_TOKENS));
