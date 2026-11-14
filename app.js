@@ -205,98 +205,112 @@ async function settings(v) {
   };
 }
 
-/* ---------- cost vs profit (per quotation line; cost is stored on the line as `cost`) ---------- */
-const itemCost = (i) => (i.cost === undefined || i.cost === null || i.cost === '') ? null : +i.cost;
+/* ---------- cost vs profit: per quotation line, an estimated cost (stored as `cost`) and an actual cost (`actual_cost`) ---------- */
+const lineVal = (i, k) => (i[k] === undefined || i[k] === null || i[k] === '') ? null : +i[k];
+const itemCost = (i) => lineVal(i, 'cost');
 const pct = (n) => n === null ? '—' : `${n.toFixed(1)}%`;
-const profitOf = (items) => {
-  const costed = items.filter((i) => itemCost(i) !== null);
-  const cost = costed.reduce((s, i) => s + itemCost(i), 0);
-  const rev = costed.reduce((s, i) => s + (+i.rate || 0), 0); // revenue of the lines that have a cost
-  return { n: costed.length, total: items.length, cost, rev, profit: rev - cost, margin: rev ? (rev - cost) / rev * 100 : null };
+// totals over the lines that have that kind of cost, so a half-filled quotation is never compared with a full one
+const sideOf = (items, k) => {
+  const has = items.filter((i) => lineVal(i, k) !== null);
+  const cost = has.reduce((s, i) => s + lineVal(i, k), 0), rev = has.reduce((s, i) => s + (+i.rate || 0), 0);
+  return { n: has.length, cost, rev, profit: rev - cost, margin: rev ? (rev - cost) / rev * 100 : null };
 };
+const profitOf = (items) => {
+  const e = sideOf(items, 'cost'), a = sideOf(items, 'actual_cost'), both = items.filter((i) => lineVal(i, 'cost') !== null && lineVal(i, 'actual_cost') !== null);
+  return { total: items.length, e, a, variance: both.reduce((s, i) => s + lineVal(i, 'actual_cost') - lineVal(i, 'cost'), 0), nBoth: both.length };
+};
+const statCard = (label, val, sub = '', neg = false) => `<div class="card stat"><span class="muted">${label}</span><b class="${neg ? 'neg' : ''}">${val}</b>${sub}</div>`;
 
 async function profit(v, id) {
   if (id) return profitDetail(v, id);
   const rows = await q(sb.from('documents').select('id,number,status,total,issue_date,customer_id,items,customers(name)').eq('type', 'quotation').order('created_at', { ascending: false }));
-  const calc = rows.map((d) => ({ d, p: profitOf(d.items) }));
-  const live = calc.filter((x) => x.p.n > 0 && x.d.status !== 'rejected');
-  const T = live.reduce((a, x) => ({ cost: a.cost + x.p.cost, rev: a.rev + x.p.rev }), { cost: 0, rev: 0 });
-  const prof = T.rev - T.cost;
+  const calc = rows.map((d) => ({ d, p: profitOf(d.items) })), ok = (x) => x.d.status !== 'rejected';
+  const E = calc.filter((x) => ok(x) && x.p.e.n), A = calc.filter((x) => ok(x) && x.p.a.n);
+  const sum = (arr, f) => arr.reduce((s, x) => s + f(x), 0);
+  const ep = sum(E, (x) => x.p.e.profit), ap = sum(A, (x) => x.p.a.profit), ar = sum(A, (x) => x.p.a.rev), vr = sum(calc.filter(ok), (x) => x.p.variance);
   v.innerHTML = `<h2>Cost vs Profit</h2>
     <div class="grid">
-      <div class="card stat"><span class="muted">Revenue</span><b>${money(T.rev)}</b>lines with a cost</div>
-      <div class="card stat"><span class="muted">Cost</span><b>${money(T.cost)}</b>${live.length} quotations</div>
-      <div class="card stat"><span class="muted">Profit</span><b class="${prof < 0 ? 'neg' : ''}">${money(prof)}</b></div>
-      <div class="card stat"><span class="muted">Margin</span><b>${pct(T.rev ? prof / T.rev * 100 : null)}</b></div>
+      ${statCard('Estimated cost', money(sum(E, (x) => x.p.e.cost)), `${E.length} quotations`)}
+      ${statCard('Actual cost', money(sum(A, (x) => x.p.a.cost)), `${A.length} quotations`)}
+      ${statCard('Estimated profit', money(ep), pct(sum(E, (x) => x.p.e.rev) ? ep / sum(E, (x) => x.p.e.rev) * 100 : null), ep < 0)}
+      ${statCard('Actual profit', money(ap), pct(ar ? ap / ar * 100 : null), ap < 0)}
+      ${statCard('Cost variance', money(vr), 'actual − estimated, lines with both', vr > 0)}
     </div>
-    <div class="card"><p class="muted">Open a quotation to enter what each line costs you. Profit = quotation rate − cost.</p>
-    ${rows.length ? `<div class="tablewrap"><table><thead><tr><th>Quotation</th><th>Customer</th><th>Status</th><th class="num">Revenue</th><th class="num">Cost</th><th class="num">Profit</th><th class="num">Margin</th></tr></thead><tbody>${calc.map(({ d, p }) =>
-      `<tr><td><a href="#/profit/${d.id}">${esc(d.number)}</a></td><td>${esc(d.customers?.name)}</td><td>${esc(d.status)}</td><td class="num">${money(d.total)}</td>
-       <td class="num">${p.n ? money(p.cost) : '—'}${p.n && p.n < p.total ? `<br><span class="muted">${p.n}/${p.total} lines</span>` : ''}</td>
-       <td class="num ${p.profit < 0 ? 'neg' : ''}">${p.n ? money(p.profit) : '—'}</td><td class="num">${pct(p.margin)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">No quotations yet.</p>'}</div>`;
+    <div class="card"><p class="muted">Open a quotation to enter the estimated cost (what you expect to pay) and the actual cost (what you really paid) for each line. Profit = quotation rate − cost. Cost variance above zero means you spent more than estimated.</p>
+    ${rows.length ? `<div class="tablewrap"><table><thead><tr><th>Quotation</th><th>Customer</th><th>Status</th><th class="num">Revenue</th><th class="num">Est. cost</th><th class="num">Actual cost</th><th class="num">Est. profit</th><th class="num">Actual profit</th><th class="num">Margin</th></tr></thead><tbody>${calc.map(({ d, p }) => {
+      const part = (s) => s.n && s.n < p.total ? `<br><span class="muted">${s.n}/${p.total} lines</span>` : '';
+      return `<tr><td><a href="#/profit/${d.id}">${esc(d.number)}</a></td><td>${esc(d.customers?.name)}</td><td>${esc(d.status)}</td><td class="num">${money(d.total)}</td>
+       <td class="num">${p.e.n ? money(p.e.cost) : '—'}${part(p.e)}</td><td class="num">${p.a.n ? money(p.a.cost) : '—'}${part(p.a)}</td>
+       <td class="num ${p.e.profit < 0 ? 'neg' : ''}">${p.e.n ? money(p.e.profit) : '—'}</td><td class="num ${p.a.profit < 0 ? 'neg' : ''}">${p.a.n ? money(p.a.profit) : '—'}</td>
+       <td class="num">${p.a.n ? pct(p.a.margin) : p.e.n ? `${pct(p.e.margin)}<br><span class="muted">est.</span>` : '—'}</td></tr>`;
+    }).join('')}</tbody></table></div>` : '<p class="muted">No quotations yet.</p>'}</div>`;
 }
 
 async function profitDetail(v, id) {
   const d = await q(sb.from('documents').select('*, customers(name)').eq('id', id).eq('type', 'quotation').single());
   const items = d.items;
   const cell = (k, t = '') => `<td${t}>${k}</td>`;
+  const inp = (i, attr, label, val) => `<td class="num"><input class="cost" ${attr}="${i}" inputmode="decimal" autocomplete="off" placeholder="0.00" maxlength="15" aria-label="${label} for line ${i + 1}" value="${val === null ? '' : esc(fmtNum(val))}"></td>`;
   const section = (key) => {
     const idx = items.map((it, i) => i).filter((i) => items[i].section === key);
     if (!idx.length) return '';
     const cm = key === 'colombo';
     const head = cm ? '<th>Date</th><th>Activity</th>' : '<th>Flight</th><th>Airline</th><th>Date</th>';
     const first = (s) => String(s || '').split('\n')[0];
-    return `<h3 class="sec2">${SECTIONS[key]}</h3><div class="tablewrap"><table><thead><tr>${head}<th>Guests</th><th>Vehicle</th><th class="num">Rate</th><th class="num">Cost</th><th class="num">Profit</th><th class="num">Margin</th></tr></thead><tbody>${idx.map((i) => {
-      const it = items[i], c = itemCost(it);
+    return `<h3 class="sec2">${SECTIONS[key]}</h3><div class="tablewrap"><table><thead><tr>${head}<th>Guests</th><th>Vehicle</th><th class="num">Rate</th><th class="num">Estimated cost</th><th class="num">Actual cost</th><th class="num">Est. profit</th><th class="num">Actual profit</th><th class="num">Margin</th></tr></thead><tbody>${idx.map((i) => {
+      const it = items[i];
       const lead = cm ? `${cell(esc(fdate(it.date)))}${cell(esc(first(it.activity || [it.pickup, it.dropoff].filter(Boolean).join(' → '))), ` title="${esc(it.activity)}"`)}` : `${cell(esc(it.flight))}${cell(esc(it.airline))}${cell(esc(fdate(it.date)))}`;
-      return `<tr>${lead}${cell(esc(it.guests))}${cell(esc(it.vehicle))}<td class="num">${money(it.rate)}</td>
-        <td class="num"><input class="cost" data-cost="${i}" inputmode="decimal" autocomplete="off" placeholder="0.00" maxlength="15" aria-label="Cost for line ${i + 1}" value="${c === null ? '' : esc(fmtNum(c))}"></td>
-        <td class="num" data-p="${i}">—</td><td class="num" data-m="${i}">—</td></tr>`;
+      return `<tr>${lead}${cell(esc(it.guests))}${cell(esc(it.vehicle))}<td class="num">${money(it.rate)}</td>${inp(i, 'data-cost', 'Estimated cost', lineVal(it, 'cost'))}${inp(i, 'data-actual', 'Actual cost', lineVal(it, 'actual_cost'))}
+        <td class="num" data-p="${i}">—</td><td class="num" data-ap="${i}">—</td><td class="num" data-m="${i}">—</td></tr>`;
     }).join('')}</tbody></table></div>`;
   };
   v.innerHTML = `<div class="row"><h2>Cost vs Profit · ${esc(d.number)}</h2><span><a href="#/view/${d.id}"><button>View quotation</button></a> <a href="#/profit"><button>All quotations</button></a></span></div>
     <p class="muted">${esc(d.customers?.name)} · ${esc(KINDS[kindOf(d)])} · status ${esc(d.status)}</p>
     <div class="grid">
-      <div class="card stat"><span class="muted">Revenue</span><b id="sRev"></b></div>
-      <div class="card stat"><span class="muted">Cost</span><b id="sCost"></b></div>
-      <div class="card stat"><span class="muted">Profit</span><b id="sProfit"></b></div>
-      <div class="card stat"><span class="muted">Margin</span><b id="sMargin"></b></div>
+      ${statCard('Revenue', '<span id="sRev"></span>')}${statCard('Estimated cost', '<span id="sEst"></span>')}${statCard('Actual cost', '<span id="sAct"></span>')}
+      ${statCard('Estimated profit', '<span id="sEP"></span>', '<span id="sEM"></span>')}${statCard('Actual profit', '<span id="sAP"></span>', '<span id="sAM"></span>')}${statCard('Cost variance', '<span id="sVar"></span>', 'actual − estimated')}
     </div>
     <p class="muted" id="sNote"></p>
     <div class="card">${['arrival', 'departure', 'colombo'].map(section).join('')}
       <p id="perr" class="err" role="alert"></p>
       <button class="primary" id="psave">Save costs</button> <span id="pok" class="muted" role="status"></span></div>`;
 
-  const rate = (i) => +items[i].rate || 0;
+  const rate = (i) => +items[i].rate || 0, raw = (attr, i) => v.querySelector(`[${attr}="${i}"]`).value.trim();
+  const mark = (el, p) => { el.textContent = p === null ? '—' : money(p); el.className = 'num' + (p !== null && p < 0 ? ' neg' : ''); };
   const recalc = () => {
-    let rev = 0, revC = 0, cost = 0, n = 0;
+    const E = { n: 0, cost: 0, rev: 0 }, A = { n: 0, cost: 0, rev: 0 }; let rev = 0, vr = 0;
     items.forEach((_, i) => {
       rev += rate(i);
-      const raw = v.querySelector(`[data-cost="${i}"]`).value.trim();
-      const pc = v.querySelector(`[data-p="${i}"]`), mc = v.querySelector(`[data-m="${i}"]`);
-      if (raw === '') { pc.textContent = mc.textContent = '—'; pc.className = mc.className = 'num'; return; }
-      const c = parseNum(raw), p = rate(i) - c;
-      n++; cost += c; revC += rate(i);
-      pc.textContent = money(p); mc.textContent = pct(rate(i) ? p / rate(i) * 100 : null);
-      pc.className = mc.className = 'num' + (p < 0 ? ' neg' : '');
+      const e = raw('data-cost', i), a = raw('data-actual', i), ec = e === '' ? null : parseNum(e), ac = a === '' ? null : parseNum(a);
+      if (ec !== null) { E.n++; E.cost += ec; E.rev += rate(i); }
+      if (ac !== null) { A.n++; A.cost += ac; A.rev += rate(i); }
+      if (ec !== null && ac !== null) vr += ac - ec;
+      mark(v.querySelector(`[data-p="${i}"]`), ec === null ? null : rate(i) - ec);
+      mark(v.querySelector(`[data-ap="${i}"]`), ac === null ? null : rate(i) - ac);
+      const base = ac !== null ? ac : ec, mc = v.querySelector(`[data-m="${i}"]`);
+      mc.textContent = base === null || !rate(i) ? '—' : pct((rate(i) - base) / rate(i) * 100) + (ac === null ? ' est.' : ''); mc.className = 'num' + (base !== null && rate(i) - base < 0 ? ' neg' : '');
     });
-    const prof = revC - cost;
-    $('#sRev').textContent = money(rev); $('#sCost').textContent = money(cost);
-    $('#sProfit').textContent = money(prof); $('#sProfit').className = prof < 0 ? 'neg' : '';
-    $('#sMargin').textContent = pct(revC ? prof / revC * 100 : null);
-    $('#sNote').textContent = `Costs entered for ${n} of ${items.length} lines. Profit and margin cover the lines that have a cost.`;
+    const ep = E.rev - E.cost, ap = A.rev - A.cost, set = (id, t, neg) => { const el = $('#' + id); el.textContent = t; el.parentElement.className = neg ? 'neg' : ''; };
+    set('sRev', money(rev)); set('sEst', money(E.cost)); set('sAct', money(A.cost));
+    set('sEP', money(ep), ep < 0); $('#sEM').textContent = pct(E.rev ? ep / E.rev * 100 : null);
+    set('sAP', money(ap), ap < 0); $('#sAM').textContent = pct(A.rev ? ap / A.rev * 100 : null);
+    set('sVar', money(vr), vr > 0);
+    $('#sNote').textContent = `Estimated cost entered for ${E.n} of ${items.length} lines, actual cost for ${A.n}. Each profit figure covers only the lines that have that cost.`;
   };
-  v.oninput = (e) => { if (e.target.dataset.cost !== undefined) { liveMoney(e.target); recalc(); $('#pok').textContent = ''; } };
+  v.oninput = (e) => { if (e.target.dataset.cost !== undefined || e.target.dataset.actual !== undefined) { liveMoney(e.target); recalc(); $('#pok').textContent = ''; } };
   recalc();
   $('#psave').onclick = async () => {
     $('#perr').textContent = ''; $('#pok').textContent = '';
     const next = [];
     for (let i = 0; i < items.length; i++) {
-      const el = v.querySelector(`[data-cost="${i}"]`), raw = el.value.trim(), { cost: _drop, ...rest } = items[i];
-      if (raw === '') { next.push(rest); continue; }
-      const c = parseNum(raw);
-      if (c > MAXAMT) { $('#perr').textContent = `Line ${i + 1}: the cost is too large.`; el.focus(); return; }
-      next.push({ ...rest, cost: c });
+      const { cost: _e, actual_cost: _a, ...rest } = items[i], out = { ...rest };
+      for (const [attr, key, label] of [['data-cost', 'cost', 'estimated cost'], ['data-actual', 'actual_cost', 'actual cost']]) {
+        const r = raw(attr, i); if (r === '') continue;
+        const c = parseNum(r);
+        if (c > MAXAMT) { $('#perr').textContent = `Line ${i + 1}: the ${label} is too large.`; v.querySelector(`[${attr}="${i}"]`).focus(); return; }
+        out[key] = c;
+      }
+      next.push(out);
     }
     try { await q(sb.from('documents').update({ items: next }).eq('id', id)); items.splice(0, items.length, ...next); $('#pok').textContent = 'Saved.'; }
     catch (err) { $('#perr').textContent = err.message; }
