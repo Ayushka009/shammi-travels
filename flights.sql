@@ -26,9 +26,7 @@ create or replace function private.flight_lines() returns table(flight text, fli
 language sql security definer set search_path = public as $fn$
   select upper(replace(i->>'flight', ' ', '')), (i->>'date')::date, i->>'section', (i->>'date')::date + (i->>'time')::time,
     c.name || ' (' || q.number || '), ' || coalesce(i->>'guests', '?') || ' pax, ' || coalesce(nullif(i->>'vehicle', ''), 'vehicle not chosen')
-    || case when coalesce(i->'assign'->>'driver', '') = '' and coalesce(i->'assign'->>'vehicle_no', '') = '' and coalesce(i->'assign'->>'provider', '') = ''
-            then ' – ⚠️ NOT ASSIGNED'
-            else ' – 🚐 ' || concat_ws(', ', nullif(i->'assign'->>'provider', ''), nullif(i->'assign'->>'vehicle_no', ''), nullif(i->'assign'->>'driver', ''), nullif(i->'assign'->>'driver_phone', '')) end
+    || ' – ' || private.assign_text(i)
   from documents q join customers c on c.id = q.customer_id, jsonb_array_elements(q.items) i
   where q.type = 'quotation' and q.status = 'accepted' and i->>'section' in ('arrival', 'departure')
     and coalesce(i->'assign'->>'status', '') <> 'cancelled'

@@ -23,6 +23,22 @@ begin
   end loop;
 end $fn$;
 
+-- One service's vehicles and drivers as text: the first vehicle is stored flat on `assign`, the others in assign.more.
+-- Says "⚠️ NOT ASSIGNED" with none, and "n of N vehicles assigned" when fewer than the quotation line needs (fleet quantities).
+create or replace function private.assign_text(i jsonb) returns text language sql immutable as $fn$
+  with u as (
+    select concat_ws(', ', nullif(x->>'type', ''), nullif(x->>'provider', ''), nullif(x->>'vehicle_no', ''), nullif(x->>'driver', ''), nullif(x->>'driver_phone', '')) as t, k
+    from jsonb_array_elements(jsonb_build_array(i->'assign') || case when jsonb_typeof(i->'assign'->'more') = 'array' then i->'assign'->'more' else '[]'::jsonb end) with ordinality as e(x, k)
+    where coalesce(x->>'provider', '') <> '' or coalesce(x->>'vehicle_no', '') <> '' or coalesce(x->>'driver', '') <> '' or coalesce(x->>'driver_phone', '') <> ''
+  ), need as (
+    select greatest(1, coalesce(sum(greatest(1, coalesce((fl->>'qty')::numeric, 1))) filter (where coalesce(fl->>'vehicle', '') <> ''), 1))::int as n
+    from jsonb_array_elements(case when jsonb_typeof(i->'fleet') = 'array' then i->'fleet' else '[]'::jsonb end) fl
+  )
+  select case when (select count(*) from u) = 0 then '⚠️ NOT ASSIGNED'
+    else '🚐 ' || (select string_agg(t, '; ' order by k) from u)
+      || case when (select n from need) > (select count(*) from u) then ' – ⚠️ ' || (select count(*) from u) || ' of ' || (select n from need) || ' vehicles assigned' else '' end end
+$fn$;
+
 -- The services of one day, from accepted quotations, one line each.
 create or replace function private.services_text(d date) returns text
 language sql security definer set search_path = public as $fn$
@@ -34,9 +50,7 @@ language sql security definer set search_path = public as $fn$
                             else split_part(coalesce(i->>'activity', 'Traveling'), E'\n', 1) end
       || ' – ' || coalesce(i->>'guests', '?') || ' pax – ' || coalesce(nullif(i->>'vehicle', ''), 'vehicle not chosen')
       || ' – ' || c.name || ' (' || q.number || ')'
-      || case when coalesce(i->'assign'->>'driver', '') = '' and coalesce(i->'assign'->>'vehicle_no', '') = '' and coalesce(i->'assign'->>'provider', '') = ''
-              then ' – ⚠️ NOT ASSIGNED'
-              else ' – 🚐 ' || concat_ws(', ', nullif(i->'assign'->>'provider', ''), nullif(i->'assign'->>'vehicle_no', ''), nullif(i->'assign'->>'driver', ''), nullif(i->'assign'->>'driver_phone', '')) end as line
+      || ' – ' || private.assign_text(i) as line
     from documents q join customers c on c.id = q.customer_id, jsonb_array_elements(q.items) i
     where q.type = 'quotation' and q.status = 'accepted' and i->>'date' = d::text
       and coalesce(i->'assign'->>'status', '') <> 'cancelled'
@@ -87,9 +101,7 @@ begin
   loop
     perform private.discord_post('✈️ **In 3 hours:** ' || initcap(r.i->>'section') || ' ' || coalesce(r.i->>'flight', '') || ' at ' || (r.i->>'time')
       || ' – ' || coalesce(r.i->>'guests', '?') || ' pax – ' || coalesce(nullif(r.i->>'vehicle', ''), 'vehicle not chosen') || ' – ' || r.customer || ' (' || r.number || ')'
-      || case when coalesce(r.i->'assign'->>'driver', '') = '' and coalesce(r.i->'assign'->>'vehicle_no', '') = '' and coalesce(r.i->'assign'->>'provider', '') = ''
-              then E'\n⚠️ NOT ASSIGNED'
-              else E'\n🚐 ' || concat_ws(', ', nullif(r.i->'assign'->>'provider', ''), nullif(r.i->'assign'->>'vehicle_no', ''), nullif(r.i->'assign'->>'driver', ''), nullif(r.i->'assign'->>'driver_phone', '')) end
+      || E'\n' || private.assign_text(r.i)
       || case when replace(coalesce(r.i->>'flight', ''), ' ', '') ~* '^[a-z0-9]{2}\d{1,4}[a-z]?$'
               then E'\nFlight status: <https://www.flightradar24.com/data/flights/' || lower(replace(r.i->>'flight', ' ', '')) || '>' else '' end);
   end loop;
