@@ -21,6 +21,16 @@ const newItem = (section = 'arrival') => ({ section, flight: '', airline: '', ac
 // A line can need several vehicles, e.g. 4 vans + 2 buses: `fleet` is the list, `vehicle` its printed text.
 const fleetOf = (i) => Array.isArray(i.fleet) && i.fleet.length ? i.fleet : [{ vehicle: i.vehicle || '', qty: 1 }];
 const fleetText = (f) => f.filter((x) => x.vehicle).map((x) => (+x.qty > 1 ? `${+x.qty} × ` : '') + x.vehicle).join(' + ');
+// the most of each vehicle type any one service needs, e.g. "4 × Van 9 Seater + 2 × Bus 45 Seater Coach"
+const fleetSummary = (items) => { const m = new Map(); for (const i of items || []) for (const x of fleetOf(i)) if (x.vehicle) m.set(x.vehicle, Math.max(m.get(x.vehicle) || 0, Math.max(1, +x.qty || 1))); return fleetText([...m].map(([vehicle, qty]) => ({ vehicle, qty }))); };
+// Agreements and invoices built from a quotation follow it: when the quotation is saved, their lines and total are refreshed
+// (agreements always; invoices unless already paid or cancelled). Cost, actual cost and vehicle assignments stay on the quotation only.
+async function syncLinked(qt) {
+  const strip = ({ cost: _c, actual_cost: _a, assign: _s, ...i }) => i;
+  const docs = await q(sb.from('documents').select('id,type,status,data').in('type', ['agreement', 'invoice']).or(`data->>quotation_id.eq.${qt.id},data->>quotation.eq.${qt.number}`));
+  for (const x of docs.filter((y) => ['agreement', 'invoice'].includes(y.type) && !['paid', 'cancelled'].includes(y.status) && (!y.data?.quotation_id || y.data.quotation_id === qt.id)))
+    await q(sb.from('documents').update({ customer_id: qt.customer_id, items: qt.items.map(strip), total: qt.total, data: { ...x.data, quotation: qt.number, quotation_id: qt.id, kind: qt.kind, ...(x.type === 'agreement' ? { vehicle: fleetSummary(qt.items) } : {}) } }).eq('id', x.id));
+}
 const vehicleCount = (i) => fleetOf(i).reduce((n, x) => n + (x.vehicle ? Math.max(1, +x.qty || 1) : 0), 0) || 1;
 const today = () => new Date().toLocaleDateString('en-CA');
 const DMIN = '2020-01-01', DMAX = '2099-12-31', MAXAMT = 999999999.99;
@@ -186,9 +196,24 @@ async function settings(v) {
     <label>Discord webhook URL (booking reminders are posted to this channel)
       <input name="discord_webhook" type="url" autocomplete="off" maxlength="300" pattern="https://(discord|discordapp)\\.com/api/webhooks/.+" title="A Discord webhook link: https://discord.com/api/webhooks/…" value="${esc(S.discord_webhook)}" placeholder="https://discord.com/api/webhooks/…"></label>
     <p class="muted">Posts today's services at 7:00 am, tomorrow's at 6:00 pm, payments due, and an alert 3 hours before each flight (Sri Lanka time). Save, then <button type="button" id="dtest">Send a test to Discord</button> <span id="dok" role="status"></span></p>
+    <details class="guide"><summary>How to get the Discord webhook link</summary>
+      <ol><li>Open Discord and pick the server and channel where reminders should appear (create a private channel such as <b>#bookings</b> first if you like).</li>
+        <li>Click the gear next to the channel name (<b>Edit Channel</b>) → <b>Integrations</b> → <b>Webhooks</b> → <b>New Webhook</b>.</li>
+        <li>Name it (e.g. Shammi Travels), check the channel, then click <b>Copy Webhook URL</b>.</li>
+        <li>Paste it in the box above (it starts with <code>https://discord.com/api/webhooks/</code>) and press <b>Save settings</b>.</li>
+        <li>Press <b>Send a test to Discord</b>: a confirmation message plus today's and tomorrow's services should appear.</li></ol>
+      <p class="muted">Anyone with this link can post to the channel, so keep it private. To stop reminders, empty the box and save; to replace a leaked link, delete the webhook in Discord and make a new one.</p></details>
     <label>Flight status API key (AeroDataBox on RapidAPI)
       <input name="flight_api_key" type="password" autocomplete="off" maxlength="100" pattern="[A-Za-z0-9_\\-]{20,100}" title="The X-RapidAPI-Key value: 20 to 100 letters and digits" value="${esc(S.flight_api_key)}"></label>
     <p class="muted">Turns on live flight status on the Schedule page and Discord alerts when a flight is delayed, cancelled, landed or departed. Get a key at rapid.aerodatabox.com (the free plan allows about 200 checks a month, roughly 28 flights).</p>
+    <details class="guide"><summary>How to get the flight status key</summary>
+      <ol><li>Go to <b>rapidapi.com</b> and create a free account.</li>
+        <li>Search for <b>AeroDataBox</b> (by “aedbx”) and open it.</li>
+        <li>Open <b>Pricing</b> and subscribe to the <b>Basic (free)</b> plan. No card is needed for the free plan.</li>
+        <li>On the <b>Endpoints</b> tab, find the <code>X-RapidAPI-Key</code> in the code snippet panel and copy its value (20 or more letters and digits).</li>
+        <li>Paste it in the box above and press <b>Save settings</b>.</li>
+        <li>Open the <b>Schedule</b> page: the <b>Check the next flight now</b> button appears, and flights within the next 24 hours get a status line.</li></ol>
+      <p class="muted">Only accepted quotations with a flight number (like SQ468), a date and a 24-hour time are checked, and each check uses 2 of the plan's monthly units, so flights are checked sparingly. Errors such as “key rejected” or “quota used up” show on the flight's line.</p></details>
     <label>Standard agreement terms
       <textarea name="terms" rows="14" maxlength="20000">${esc(S.terms)}</textarea></label>
     ${termsGuide}
@@ -768,7 +793,8 @@ async function edit(v, type, id, cid, qid) {
       qsel.innerHTML = `<option value="">None (enter total manually)</option>${mine.map((x) => `<option value="${x.id}" ${x.id === sel ? 'selected' : ''}>${esc(x.number)} · ${money(x.total)}${x.status === 'accepted' ? '' : ' (' + x.status + ')'}</option>`).join('')}`;
       sync();
     };
-    const sync = () => { const x = quotes.find((y) => y.id === qsel.value); rate.readOnly = !!x; if (x) rate.value = fmtNum(x.total); };
+    const veh = document.querySelector('[name=vehicle]');
+    const sync = () => { const x = quotes.find((y) => y.id === qsel.value); rate.readOnly = !!x; veh.readOnly = !!x; if (x) { rate.value = fmtNum(x.total); veh.value = fleetSummary(x.items); } };
     rate.oninput = () => liveMoney(rate);
     $('#resetTerms').onclick = () => { if (!S.terms) return alert('There are no standard terms yet. Add them under Settings first.'); if (confirm('Replace the terms below with the standard Transportation Services Agreement terms?')) document.querySelector('[name=terms]').value = S.terms; };
     cust.onchange = () => fillQ('');
@@ -790,6 +816,7 @@ async function edit(v, type, id, cid, qid) {
       if (!qt && !(row.total > 0)) return bad('Enter the agreed total, or pick an accepted quotation.', $('#rate'));
       if (row.total > MAXAMT) return bad('The agreed total is too large.', $('#rate'));
       row.data = Object.fromEntries(['company', 'service', 'vehicle', 'pickup', 'dropoff', 'start', 'end', 'deposit', 'terms'].map((k) => [k, fd[k] || '']));
+      if (qt) row.data.vehicle = fleetSummary(qt.items);
       if (qt) Object.assign(row.data, { kind: kindOf(qt), quotation: qt.number, quotation_id: qt.id });
     } else {
       const live = items.map((it, n) => [it, n]).filter(([i]) => (i.flight || i.activity || i.pickup || '').trim() || +i.rate);
@@ -836,6 +863,7 @@ async function edit(v, type, id, cid, qid) {
     }
     try {
       const rid = id ? (await q(sb.from('documents').update(row).eq('id', id)), id) : await nextInsert(row);
+      if (id && type === 'quotation') await syncLinked({ id, number: d.number, customer_id: row.customer_id, items: row.items, total: row.total, kind }).catch((e2) => alert(`Saved, but the linked agreement or invoice could not be refreshed: ${e2.message}`));
       location.hash = `#/view/${rid}`;
     } catch (err) { alert(err.message); }
   };
@@ -1097,9 +1125,10 @@ async function view(v, id) {
     ${bank || '<p class="p err noprint">Bank details are missing: add them in Settings.</p>'}
     <p class="p">Please quote invoice number <b>${esc(d.number)}</b> as the payment reference. All amounts are in Sri Lankan Rupees (LKR).</p>
     <p class="p">Services are subject to the agreed Terms &amp; Conditions.</p>`;
+  const agrVeh = (d.items || []).length ? fleetSummary(d.items) : f.vehicle; // follows the quotation's lines
   const body = d.type === 'agreement' ? `
     ${parties}
-    ${[f.quotation, f.service, f.vehicle, f.pickup, f.dropoff, f.start, f.end, f.deposit].some(Boolean) || (d.total && !d.items.length) ? `<table><tbody>${[['Quotation', f.quotation], ['Service', f.service], ['Vehicle', f.vehicle], ['Pick-up', f.pickup], ['Drop-off', f.dropoff], ['Start', f.start ? fdate(String(f.start).slice(0, 10)) : ''], ['End', f.end ? fdate(String(f.end).slice(0, 10)) : ''], ['Agreed total', d.total && !d.items.length ? money(d.total) : ''], ['Deposit', f.deposit]]
+    ${[f.quotation, f.service, agrVeh, f.pickup, f.dropoff, f.start, f.end, f.deposit].some(Boolean) || (d.total && !d.items.length) ? `<table><tbody>${[['Quotation', f.quotation], ['Service', f.service], ['Vehicles', agrVeh], ['Pick-up', f.pickup], ['Drop-off', f.dropoff], ['Start', f.start ? fdate(String(f.start).slice(0, 10)) : ''], ['End', f.end ? fdate(String(f.end).slice(0, 10)) : ''], ['Agreed total', d.total && !d.items.length ? money(d.total) : ''], ['Deposit', f.deposit]]
       .filter(([, x]) => x).map(([k, x]) => `<tr><th>${k}</th><td>${esc(x)}</td></tr>`).join('')}</tbody></table>` : ''}
     ${d.items.length ? `${['arrival', 'departure', 'colombo'].map(section).join('')}<div class="totalbar"><span>AGREED TOTAL</span><span>${money(d.total, 0)}</span></div>` : ''}
     ${termsHtml(f.terms)}${/\{\{bank\}\}/.test(f.terms || '') ? '' : bank}${signBlock}`
@@ -1179,7 +1208,7 @@ async function view(v, id) {
   if (d.type === 'quotation') $('#conv').onclick = async () => {
     try {
       const { id: _i, number: _n, created_at: _c, customers: _cu, ...rest } = d;
-      const nid = await nextInsert({ ...rest, type: 'invoice', status: 'draft', issue_date: today(), due_date: today(), data: { ...(rest.data || {}), quotation: d.number } });
+      const nid = await nextInsert({ ...rest, type: 'invoice', status: 'draft', issue_date: today(), due_date: today(), data: { ...(rest.data || {}), quotation: d.number, quotation_id: d.id } });
       location.hash = `#/view/${nid}`;
     } catch (err) { alert(err.message); }
   };
