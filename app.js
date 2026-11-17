@@ -483,10 +483,10 @@ async function scheduleView(v, mode) {
       x.checked_at ? `checked ${new Date(x.checked_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''].filter(Boolean);
     return `<p class="${bad ? 'neg' : ''}">✈ ${bits.join(' · ')}${x.live ? '' : ' <span class="muted">(schedule data only)</span>'}${x.error ? ` <span class="muted">· ${esc(x.error)}</span>` : ''}</p>`;
   };
-  const lines = docs.flatMap((d) => (d.items || []).map((it, idx) => ({ d, it, idx, a: it.assign || {} })))
-    .filter((l) => l.it.date && (past ? l.it.date < today() : l.it.date >= today()))
-    .sort((x, y) => (past ? -1 : 1) * x.it.date.localeCompare(y.it.date) || timeMin(x.it.time) - timeMin(y.it.time));
   const st = (l) => l.a.status || (unitsOf(l.a).length ? 'assigned' : 'unassigned');
+  const lines = docs.flatMap((d) => (d.items || []).map((it, idx) => ({ d, it, idx, a: it.assign || {} })))
+    .filter((l) => l.it.date && (past ? l.it.date < today() || st(l) === 'completed' : l.it.date >= today() && st(l) !== 'completed')) // completed services move to Past
+    .sort((x, y) => (past ? -1 : 1) * x.it.date.localeCompare(y.it.date) || timeMin(x.it.time) - timeMin(y.it.time));
   const open = lines.filter((l) => st(l) === 'unassigned').length;
   const fld = (name, label, val, attrs = '') => `<label>${label}<input name="${name}" value="${esc(val)}" ${attrs}></label>`;
   // u = one vehicle (for that driver's own message); without it the customer's message lists every vehicle
@@ -526,7 +526,7 @@ async function scheduleView(v, mode) {
     const btns = us.map((u, k) => { const tel = String(u.driver_phone || '').replace(/[^\\d+]/g, ''), tag = us.length > 1 ? ` ${k + 1}` : '';
       return `${tel ? `<a class="btnlink" href="tel:${esc(tel)}">Call driver${tag}</a>` : ''} ${u.track_url ? `<a class="btnlink" href="${esc(u.track_url)}" target="_blank" rel="noopener noreferrer">Track vehicle${tag}</a>` : ''}`; }).join(' ');
     return `<div class="card trip">
-      <div class="row"><b>${esc(it.time || 'Time not set')} · ${esc(lineTitle(it))}</b><span class="badge s-${s.replace(/ /g, '')}">${esc(s)}</span></div>
+      <div class="row"><b>${esc(it.time || 'Time not set')} · ${esc(lineTitle(it))}</b><select class="badge qs s-${s.replace(/ /g, '')}" aria-label="Change status" data-doc="${d.id}" data-idx="${l.idx}" data-key="${esc(lineKey(it))}">${ASTATUS.filter((x) => x !== 'unassigned' || !us.length).map((x) => `<option ${x === s ? 'selected' : ''}>${x}</option>`).join('')}</select></div>
       <p class="muted">${esc(it.guests)} guests · ${esc(it.vehicle || 'vehicle not chosen')} · <a href="#/customer/${d.customer_id}">${esc(d.customers?.name)}</a> · <a href="#/view/${d.id}">${esc(d.number)}</a></p>
       ${flightLine(it)}
       ${need > 1 ? `<p class="${us.length < need ? 'neg' : 'muted'}">${us.length} of ${need} vehicles assigned</p>` : ''}
@@ -557,6 +557,20 @@ async function scheduleView(v, mode) {
     try { await navigator.clipboard.writeText(ta.value); e.target.textContent = 'Copied'; } catch { try { document.execCommand('copy'); e.target.textContent = 'Copied'; } catch { e.target.textContent = 'Select and copy'; } }
     setTimeout(() => { e.target.textContent = 'Copy message'; }, 1800);
   });
+  // quick status change from the card header
+  v.onchange = async (e) => {
+    const el = e.target; if (!el.classList.contains('qs')) return;
+    const status = el.value, msg = $('#fmsg'); el.disabled = true;
+    try {
+      const fresh = await q(sb.from('documents').select('items').eq('id', el.dataset.doc).single()), idx = +el.dataset.idx, it = fresh.items[idx];
+      if (!it || lineKey(it) !== el.dataset.key) throw new Error('This quotation was changed in the meantime. Reload the page and try again.');
+      if (['assigned', 'confirmed', 'on the way'].includes(status) && !unitsOf(it.assign || {}).length) throw new Error('Assign a vehicle or driver first (use “Assign a vehicle” on the card).');
+      const { assign: old, ...rest } = it, a = { ...(old || {}), status };
+      fresh.items[idx] = status === 'unassigned' && !unitsOf(a).length && !a.note ? rest : { ...rest, assign: a };
+      await q(sb.from('documents').update({ items: fresh.items }).eq('id', el.dataset.doc));
+      route();
+    } catch (err) { msg.textContent = err.message; el.disabled = false; el.value = el.querySelector('option[selected]')?.value || el.value; }
+  };
   v.onclick = (e) => {
     const f = e.target.closest?.('form.af'); if (!f) return;
     const number = () => f.querySelectorAll('.un').forEach((x, k) => { x.textContent = k + 1; });

@@ -139,3 +139,4 @@ nav a{display:inline-flex;align-items:center;min-height:40px}
 .fleet .frow label{margin:0}
 fieldset.unit{border:1px solid var(--line);border-radius:8px;margin:8px 0;padding:8px 12px}
 fieldset.unit legend{font-weight:600;padding:0 6px}
+select.badge.qs{display:inline-block;width:auto;margin:0;padding:2px 8px;font-size:12px;cursor:pointer;background:var(--card)}
