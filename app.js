@@ -17,7 +17,11 @@ const kindOf = (d) => {
   return s.has('c') && s.has('a') ? 'both' : s.has('c') ? 'colombo' : 'airport';
 };
 const vehicleSelect = (attrs, cur) => `<select ${attrs}><option value="">Select…</option>${(VEHICLES.includes(cur) || !cur ? VEHICLES : [cur, ...VEHICLES]).map((o) => `<option ${o === cur ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
-const newItem = (section = 'arrival') => ({ section, flight: '', airline: '', activity: '', comments: '', pickup: '', dropoff: '', date: '', time: '', guests: 1, vehicle: '', rate: 0 });
+const newItem = (section = 'arrival') => ({ section, flight: '', airline: '', activity: '', comments: '', pickup: '', dropoff: '', date: '', time: '', guests: 1, vehicle: '', fleet: [{ vehicle: '', qty: 1 }], rate: 0 });
+// A line can need several vehicles, e.g. 4 vans + 2 buses: `fleet` is the list, `vehicle` its printed text.
+const fleetOf = (i) => Array.isArray(i.fleet) && i.fleet.length ? i.fleet : [{ vehicle: i.vehicle || '', qty: 1 }];
+const fleetText = (f) => f.filter((x) => x.vehicle).map((x) => (+x.qty > 1 ? `${+x.qty} × ` : '') + x.vehicle).join(' + ');
+const vehicleCount = (i) => fleetOf(i).reduce((n, x) => n + (x.vehicle ? Math.max(1, +x.qty || 1) : 0), 0) || 1;
 const today = () => new Date().toLocaleDateString('en-CA');
 const DMIN = '2020-01-01', DMAX = '2099-12-31', MAXAMT = 999999999.99;
 // "1234567.5" -> "1,234,567.5": digits and one dot only, max 2 decimals
@@ -425,6 +429,8 @@ async function providers(v) {
 // The assignment is stored on the quotation line itself (like its cost), as `assign`.
 const ASTATUS = ['unassigned', 'assigned', 'confirmed', 'on the way', 'completed', 'cancelled'];
 const lineTitle = (i) => i.section === 'colombo' ? String(i.activity || [i.pickup, i.dropoff].filter(Boolean).join(' → ') || 'Traveling').split('\n')[0] : `${i.section === 'departure' ? 'Departure' : 'Arrival'} ${i.flight || ''}`.trim();
+// Several vehicles per service: the first is stored flat on `assign` (the reminders read it), the rest in `assign.more`.
+const unitsOf = (a) => [a, ...(a.more || [])].filter((u) => u && (u.provider || u.vehicle_no || u.driver || u.driver_phone));
 const lineKey = (i) => [i.section, i.date, i.time, i.flight, i.activity].map((x) => x || '').join('|');
 const flightUrl = (i) => { const c = String(i.flight || '').replace(/\s+/g, '').toLowerCase(); return i.section !== 'colombo' && /^[a-z0-9]{2}\d{1,4}[a-z]?$/.test(c) ? `https://www.flightradar24.com/data/flights/${c}` : ''; };
 // "23:30", "6:45pm", "9.30 AM", "12. 00 Noon" -> minutes after midnight (unknown times sort last)
@@ -455,47 +461,59 @@ async function scheduleView(v, mode) {
   const lines = docs.flatMap((d) => (d.items || []).map((it, idx) => ({ d, it, idx, a: it.assign || {} })))
     .filter((l) => l.it.date && (past ? l.it.date < today() : l.it.date >= today()))
     .sort((x, y) => (past ? -1 : 1) * x.it.date.localeCompare(y.it.date) || timeMin(x.it.time) - timeMin(y.it.time));
-  const st = (l) => l.a.status || (l.a.driver || l.a.vehicle_no ? 'assigned' : 'unassigned');
+  const st = (l) => l.a.status || (unitsOf(l.a).length ? 'assigned' : 'unassigned');
   const open = lines.filter((l) => st(l) === 'unassigned').length;
   const fld = (name, label, val, attrs = '') => `<label>${label}<input name="${name}" value="${esc(val)}" ${attrs}></label>`;
-  const tripCtx = (l) => {
-    const { it, a, d } = l, c = d.customers || {}, fu = flightUrl(it);
-    return { customer: c.name || '', business: S.name || '', signatory: S.signatory || 'Ayushka Weerasinghe', phone: S.phone || '', driver: a.driver || '', customer_phone: c.phone || '',
+  // u = one vehicle (for that driver's own message); without it the customer's message lists every vehicle
+  const tripCtx = (l, u) => {
+    const { it, d } = l, c = d.customers || {}, fu = flightUrl(it), us = u ? [u] : unitsOf(l.a), many = us.length > 1, a = us[0] || {};
+    const tag = (x) => many ? `${[x.type, x.vehicle_no].filter(Boolean).join(' ')}: ` : '';
+    return { customer: c.name || '', business: S.name || '', signatory: S.signatory || 'Ayushka Weerasinghe', phone: S.phone || '', driver: us.map((x) => x.driver).filter(Boolean).join(', '), customer_phone: c.phone || '',
       trip_what: lineTitle(it), trip_date: fdate(it.date), trip_time: it.time || 'time to be confirmed', trip_guests: String(it.guests ?? ''), trip_vehicle: it.vehicle || '',
       trip_details: it.section === 'colombo' ? String(it.activity || '') : '',
-      vehicle_line: [it.vehicle && `Vehicle: ${it.vehicle}`, a.vehicle_no].filter(Boolean).join(' ').replace(/^$/, ''), driver_line: a.driver ? `Driver: *${a.driver}*${a.driver_phone ? ` (${a.driver_phone})` : ''}` : '',
-      track_line: a.track_url ? `Live location: ${a.track_url}` : '', flight_line: fu ? `Flight status: ${fu}` : '', trip_note_line: a.note ? `Note: ${a.note}` : '' };
+      vehicle_line: many ? `Vehicles: ${[it.vehicle, us.map((x) => x.vehicle_no).filter(Boolean).join(', ')].filter(Boolean).join(' – ')}` : [(u && a.type || it.vehicle) && `Vehicle: ${u && a.type || it.vehicle}`, a.vehicle_no].filter(Boolean).join(' ').replace(/^$/, ''),
+      driver_line: us.filter((x) => x.driver).map((x) => `${tag(x)}Driver: *${x.driver}*${x.driver_phone ? ` (${x.driver_phone})` : ''}`).join('\n'),
+      track_line: us.filter((x) => x.track_url).map((x) => `${many ? 'Live location (' + (x.vehicle_no || x.type || 'vehicle') + '): ' : 'Live location: '}${x.track_url}`).join('\n'), flight_line: fu ? `Flight status: ${fu}` : '', trip_note_line: l.a.note ? `Note: ${l.a.note}` : '' };
   };
   const msgBlock = (l, n) => {
-    const { a, d } = l, c = d.customers || {}, ctx = tripCtx(l), has = !!(a.driver || a.vehicle_no || a.provider);
-    const box = (id, who, tpl, phone, ok) => !tpls[tpl] ? `<p class="muted">No “${esc(who)}” template yet: add it under Settings → Message templates.</p>`
+    const { d } = l, c = d.customers || {}, ctx = tripCtx(l), us = unitsOf(l.a), has = !!us.length;
+    const box = (id, who, tpl, phone, ok, cx = ctx) => !tpls[tpl] ? `<p class="muted">No “${esc(who)}” template yet: add it under Settings → Message templates.</p>`
       : !ok ? `<p class="muted">${who}: assign a vehicle or driver first.</p>`
-      : `<h4>${who}</h4><label>Message<textarea id="${id}" rows="8" data-phone="${esc(waNumber(phone))}">${esc(fillMsg(tpls[tpl].whatsapp, ctx))}</textarea></label>
+      : `<h4>${who}</h4><label>Message<textarea id="${id}" rows="8" data-phone="${esc(waNumber(phone))}">${esc(fillMsg(tpls[tpl].whatsapp, cx))}</textarea></label>
          <p class="muted">To: ${waNumber(phone) ? esc(phone) : 'no valid phone saved, choose the contact in WhatsApp'}</p>
          <p><a class="btnlink primary" data-wa="${id}" target="_blank" rel="noopener noreferrer">Open WhatsApp</a> <button type="button" data-copy="${id}">Copy message</button></p>`;
-    return `<details class="guide"><summary>WhatsApp messages (customer and driver)</summary>${box(`mc-${n}`, 'To the customer', 'trip_customer', c.phone, has)}${box(`md-${n}`, 'To the driver', 'trip_driver', a.driver_phone, has)}
+    return `<details class="guide"><summary>WhatsApp messages (customer and driver)</summary>${box(`mc-${n}`, 'To the customer', 'trip_customer', c.phone, has)}${has ? us.map((u, k) => box(`md-${n}-${k}`, us.length > 1 ? `To driver ${k + 1}${u.driver ? ` (${u.driver})` : ''}` : 'To the driver', 'trip_driver', u.driver_phone, true, tripCtx(l, u))).join('') : box(`md-${n}`, 'To the driver', 'trip_driver', '', false)}
       <p class="muted">Drafts only: nothing is sent from here.</p></details>`;
   };
+  const ufld = (k, label, val, attrs = '') => `<label>${label}<input data-k="${k}" value="${esc(val)}" ${attrs}></label>`;
+  const unitForm = (u, k, tid) => `<fieldset class="unit"><legend>Vehicle <span class="un">${k + 1}</span></legend><div class="grid">
+      ${ufld('type', 'Vehicle type', u.type, `list="${tid}" maxlength="60" autocomplete="off"`)}
+      ${ufld('provider', 'Provider', u.provider, 'list="plist" maxlength="120" autocomplete="off" placeholder="Own vehicle or a provider"')}
+      ${ufld('vehicle_no', 'Vehicle number', u.vehicle_no, 'maxlength="20" autocomplete="off" placeholder="e.g. WP CAB-1234"')}
+      ${ufld('driver', 'Driver name', u.driver, 'maxlength="80"')}
+      ${ufld('driver_phone', 'Driver phone', u.driver_phone, 'type="tel" maxlength="20"')}</div>
+    ${ufld('track_url', 'Live location link (the driver\'s Google Maps or WhatsApp live-location share link)', u.track_url, 'type="url" maxlength="300" placeholder="https://maps.app.goo.gl/…"')}
+    <button type="button" class="mini danger" data-urm>Remove this vehicle</button></fieldset>`;
   const card = (l, n) => {
-    const { it, a, d } = l, s = st(l), fu = flightUrl(it), tel = String(a.driver_phone || '').replace(/[^\d+]/g, '');
-    const who = [a.provider, a.vehicle_no, a.driver, a.driver_phone].filter(Boolean).join(' · ');
+    const { it, a, d } = l, s = st(l), fu = flightUrl(it), us = unitsOf(a), need = vehicleCount(it), tid = `tl-${n}`;
+    const planned = fleetOf(it).flatMap((x) => Array(x.vehicle ? Math.max(1, +x.qty || 1) : 0).fill(x.vehicle));
+    const rows = Array.from({ length: Math.max(us.length, need) }, (_, k) => us[k] || { type: need > 1 ? planned[k] || '' : '' });
+    const btns = us.map((u, k) => { const tel = String(u.driver_phone || '').replace(/[^\\d+]/g, ''), tag = us.length > 1 ? ` ${k + 1}` : '';
+      return `${tel ? `<a class="btnlink" href="tel:${esc(tel)}">Call driver${tag}</a>` : ''} ${u.track_url ? `<a class="btnlink" href="${esc(u.track_url)}" target="_blank" rel="noopener noreferrer">Track vehicle${tag}</a>` : ''}`; }).join(' ');
     return `<div class="card trip">
       <div class="row"><b>${esc(it.time || 'Time not set')} · ${esc(lineTitle(it))}</b><span class="badge s-${s.replace(/ /g, '')}">${esc(s)}</span></div>
       <p class="muted">${esc(it.guests)} guests · ${esc(it.vehicle || 'vehicle not chosen')} · <a href="#/customer/${d.customer_id}">${esc(d.customers?.name)}</a> · <a href="#/view/${d.id}">${esc(d.number)}</a></p>
       ${flightLine(it)}
-      <p>${who ? esc(who) : '<span class="neg">No vehicle assigned yet</span>'}${a.note ? `<br><span class="muted">${esc(a.note)}</span>` : ''}</p>
-      <p class="tripbtns">${fu ? `<a class="btnlink" href="${fu}" target="_blank" rel="noopener noreferrer">Track flight ${esc(it.flight)}</a>` : ''}
-        ${tel ? `<a class="btnlink" href="tel:${esc(tel)}">Call driver</a>` : ''}
-        ${a.track_url ? `<a class="btnlink" href="${esc(a.track_url)}" target="_blank" rel="noopener noreferrer">Track vehicle</a>` : ''}</p>
+      ${need > 1 ? `<p class="${us.length < need ? 'neg' : 'muted'}">${us.length} of ${need} vehicles assigned</p>` : ''}
+      ${us.length ? us.map((u) => `<p>${esc([u.type, u.provider, u.vehicle_no, u.driver, u.driver_phone].filter(Boolean).join(' · '))}</p>`).join('') : '<p><span class="neg">No vehicle assigned yet</span></p>'}${a.note ? `<p class="muted">${esc(a.note)}</p>` : ''}
+      <p class="tripbtns">${fu ? `<a class="btnlink" href="${fu}" target="_blank" rel="noopener noreferrer">Track flight ${esc(it.flight)}</a>` : ''}${btns}</p>
       ${msgBlock(l, n)}
-      <details class="guide"><summary>${who ? 'Change assignment' : 'Assign a vehicle'}</summary>
-        <form class="af" data-doc="${d.id}" data-idx="${l.idx}" data-key="${esc(lineKey(it))}" novalidate><div class="grid">
-          ${fld('provider', 'Provider', a.provider, 'list="plist" maxlength="120" autocomplete="off" placeholder="Own vehicle or a provider"')}
-          ${fld('vehicle_no', 'Vehicle number', a.vehicle_no, 'maxlength="20" autocomplete="off" placeholder="e.g. WP CAB-1234"')}
-          ${fld('driver', 'Driver name', a.driver, 'maxlength="80"')}
-          ${fld('driver_phone', 'Driver phone', a.driver_phone, 'type="tel" pattern="[0-9+ ]{7,20}" maxlength="20"')}
-          <label>Status <select name="status">${ASTATUS.map((x) => `<option ${x === s ? 'selected' : ''}>${x}</option>`).join('')}</select></label></div>
-          ${fld('track_url', 'Live location link (the driver\'s Google Maps or WhatsApp live-location share link)', a.track_url, 'type="url" maxlength="300" placeholder="https://maps.app.goo.gl/…"')}
+      <details class="guide"><summary>${us.length ? 'Change assignment' : need > 1 ? `Assign ${need} vehicles` : 'Assign a vehicle'}</summary>
+        <datalist id="${tid}">${fleetOf(it).filter((x) => x.vehicle).map((x) => `<option value="${esc(x.vehicle)}">`).join('')}</datalist>
+        <form class="af" data-doc="${d.id}" data-idx="${l.idx}" data-key="${esc(lineKey(it))}" data-tid="${tid}" novalidate>
+          <div class="units">${rows.map((u, k) => unitForm(u, k, tid)).join('')}</div>
+          <p><button type="button" data-uadd>+ Add another vehicle</button></p>
+          <div class="grid"><label>Status <select name="status">${ASTATUS.map((x) => `<option ${x === s ? 'selected' : ''}>${x}</option>`).join('')}</select></label></div>
           ${fld('note', 'Note', a.note, 'maxlength="200"')}
           <p class="err aerr" role="alert"></p><button class="primary">Save assignment</button></form></details></div>`;
   };
@@ -514,6 +532,12 @@ async function scheduleView(v, mode) {
     try { await navigator.clipboard.writeText(ta.value); e.target.textContent = 'Copied'; } catch { try { document.execCommand('copy'); e.target.textContent = 'Copied'; } catch { e.target.textContent = 'Select and copy'; } }
     setTimeout(() => { e.target.textContent = 'Copy message'; }, 1800);
   });
+  v.onclick = (e) => {
+    const f = e.target.closest?.('form.af'); if (!f) return;
+    const number = () => f.querySelectorAll('.un').forEach((x, k) => { x.textContent = k + 1; });
+    if (e.target.dataset.uadd !== undefined) { f.querySelector('.units').insertAdjacentHTML('beforeend', unitForm({}, f.querySelectorAll('.unit').length, f.dataset.tid)); number(); }
+    else if (e.target.dataset.urm !== undefined) { e.target.closest('.unit').remove(); number(); }
+  };
   if ($('#fnow')) $('#fnow').onclick = async (e) => {
     const b = e.currentTarget, msg = $('#fmsg'); b.disabled = true;
     try {
@@ -530,16 +554,22 @@ async function scheduleView(v, mode) {
     const f = e.target; if (!f.classList.contains('af')) return;
     e.preventDefault();
     const err = f.querySelector('.aerr'); err.textContent = '';
-    const a = Object.fromEntries(['provider', 'vehicle_no', 'driver', 'driver_phone', 'track_url', 'status', 'note'].map((k) => [k, f[k].value.trim().replace(/\s+/g, ' ')]));
-    if (a.driver_phone && !f.driver_phone.checkValidity()) return (err.textContent = 'The driver phone must be 7 to 20 characters: digits, + and spaces.');
-    if (a.track_url && !/^https:\/\/[^\s]+$/.test(a.track_url)) return (err.textContent = 'The live location link must start with https://');
-    const filled = a.provider || a.vehicle_no || a.driver || a.driver_phone;
+    const units = [...f.querySelectorAll('.unit')].map((fs) => Object.fromEntries(['type', 'provider', 'vehicle_no', 'driver', 'driver_phone', 'track_url'].map((k) => [k, fs.querySelector(`[data-k=${k}]`).value.trim().replace(/\s+/g, ' ')])))
+      .filter((u) => u.provider || u.vehicle_no || u.driver || u.driver_phone || u.track_url);
+    for (const [k, u] of units.entries()) {
+      const who = units.length > 1 ? `Vehicle ${k + 1}: ` : '';
+      if (u.driver_phone && !/^[0-9+ ]{7,20}$/.test(u.driver_phone)) return (err.textContent = `${who}the driver phone must be 7 to 20 characters: digits, + and spaces.`);
+      if (u.track_url && !/^https:\/\/[^\s]+$/.test(u.track_url)) return (err.textContent = `${who}the live location link must start with https://`);
+    }
+    const filled = units.some((u) => u.provider || u.vehicle_no || u.driver || u.driver_phone);
+    const a = { provider: '', vehicle_no: '', driver: '', driver_phone: '', track_url: '', ...(units[0] || {}), status: f.status.value, note: f.note.value.trim().replace(/\s+/g, ' ') };
+    if (units.length > 1) a.more = units.slice(1);
     if (a.status === 'unassigned' && filled) a.status = 'assigned';
     if (['assigned', 'confirmed', 'on the way'].includes(a.status) && !filled) return (err.textContent = 'Enter the provider, vehicle number or driver first.');
     try {
       const fresh = await q(sb.from('documents').select('items').eq('id', f.dataset.doc).single()), idx = +f.dataset.idx;
       if (!fresh.items[idx] || lineKey(fresh.items[idx]) !== f.dataset.key) return (err.textContent = 'This quotation was changed in the meantime. Reload the page and try again.');
-      const empty = !filled && !a.track_url && !a.note && a.status === 'unassigned';
+      const empty = !units.length && !a.note && a.status === 'unassigned';
       const { assign: _old, ...rest } = fresh.items[idx];
       fresh.items[idx] = empty ? rest : { ...rest, assign: a };
       await q(sb.from('documents').update({ items: fresh.items }).eq('id', f.dataset.doc));
@@ -633,7 +663,7 @@ async function edit(v, type, id, cid, qid) {
       <label>Status <select name="status">${STATUS[type].map((s) => `<option ${s === d.status ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
     </div>
     ${agr ? `<label>Based on accepted quotation <select name="quotation_id" id="qsel"></select></label>
-      <div class="grid">${field('company', 'Client organisation (e.g. Curtin University)')}${field('service', 'Service (e.g. airport transfer, tour)')}<label>Vehicle${vehicleSelect('name="vehicle"', f.vehicle)}</label>${field('pickup', 'Pick-up location')}${field('dropoff', 'Drop-off location')}${field('start', 'Start date', 'date')}${field('end', 'End date', 'date')}
+      <div class="grid">${field('company', 'Client organisation (e.g. Curtin University)')}${field('service', 'Service (e.g. airport transfer, tour)')}<label>Vehicle(s) (e.g. 4 × Van 9 Seater + 2 × Bus 45 Seater Coach)<input name="vehicle" list="avl" maxlength="200" autocomplete="off" value="${esc(f.vehicle)}"><datalist id="avl">${VEHICLES.map((o) => `<option value="${esc(o)}">`).join('')}</datalist></label>${field('pickup', 'Pick-up location')}${field('dropoff', 'Drop-off location')}${field('start', 'Start date', 'date')}${field('end', 'End date', 'date')}
       <label>Agreed total (${CONFIG.CURRENCY})<input name="rate" id="rate" inputmode="decimal" autocomplete="off" placeholder="0.00" maxlength="15" value="${d.total ? esc(fmtNum(d.total)) : ''}"></label>${field('deposit', 'Deposit')}</div>
       <label>Terms & conditions<textarea name="terms" rows="14" required maxlength="20000">${esc(f.terms)}</textarea></label>
       <button type="button" id="resetTerms">Load standard terms</button>
@@ -658,6 +688,7 @@ async function edit(v, type, id, cid, qid) {
   let kind = kindOf(d);
   const fit = () => items.forEach((i) => { if (!KIND_SECTIONS[kind].includes(i.section)) i.section = KIND_SECTIONS[kind][0]; });
   fit();
+  items.forEach((i) => { i.fleet = fleetOf(i).map((x) => ({ vehicle: x.vehicle, qty: x.qty })); });
   // ---- invoice payment plan: full payment, or split into percentage instalments
   let pay = (f.payments && f.payments.length) ? f.payments.map((x) => ({ ...x })) : [{ label: 'Full payment', percent: 100, due: d.due_date || '', paid: false, paidDate: '' }];
   let mode = pay.length > 1 ? 'split' : 'full';
@@ -687,20 +718,20 @@ async function edit(v, type, id, cid, qid) {
     const inp = (i, k, label, t = 'text', extra = '') => k === 'rate'
       ? `<label>${label}<input data-i="${i}" data-k="rate" inputmode="decimal" autocomplete="off" placeholder="0.00" maxlength="15" value="${items[i].rate ? esc(fmtNum(items[i].rate)) : ''}"></label>`
       : `<label>${label}<input data-i="${i}" data-k="${k}" type="${t}" ${t === 'date' ? `min="${DMIN}" max="${DMAX}"` : k === 'guests' ? 'min="1" max="500" step="1"' : t === 'text' ? 'maxlength="200"' : ''} value="${esc(items[i][k])}"></label>`;
-    const veh = (i, it) => `<label>Vehicle${vehicleSelect(`data-i="${i}" data-k="vehicle"`, it.vehicle)}</label>`;
+    const veh = (i, it) => `<div class="wide fleet"><span class="muted">Vehicles</span>${it.fleet.map((x, j) => `<div class="frow"><label>Vehicle${vehicleSelect(`data-i="${i}" data-j="${j}" data-fk="vehicle"`, x.vehicle)}</label><label>Qty<input data-i="${i}" data-j="${j}" data-fk="qty" type="number" min="1" max="50" step="1" value="${esc(x.qty)}"></label>${it.fleet.length > 1 ? `<button type="button" class="danger" data-frm="${i}.${j}" aria-label="Remove vehicle">✕</button>` : '<span></span>'}</div>`).join('')}<button type="button" class="mini" data-fadd="${i}">+ Add another vehicle type</button></div>`;
     const typeSel = (i, it) => KIND_SECTIONS[kind].length > 1 ? `<label>Type<select data-i="${i}" data-k="section">${KIND_SECTIONS[kind].map((k) => `<option value="${k}" ${k === it.section ? 'selected' : ''}>${SECTIONS[k]}</option>`).join('')}</select></label>` : '';
     $('#items').innerHTML = items.map((it, i) => `<div class="item">${typeSel(i, it)}${it.section === 'colombo'
-      ? `${inp(i, 'date', 'Date', 'date')}${inp(i, 'time', 'Time (e.g. 9:00am)')}${inp(i, 'guests', 'Guests', 'number', 'min="0"')}${veh(i, it)}${inp(i, 'rate', 'Rate', 'number', 'min="0" step="0.01"')}
+      ? `${inp(i, 'date', 'Date', 'date')}${inp(i, 'time', 'Time (e.g. 9:00am)')}${inp(i, 'guests', 'Guests', 'number', 'min="0"')}${inp(i, 'rate', 'Rate', 'number', 'min="0" step="0.01"')}${veh(i, it)}
       <label class="wide">Activity (one per line)<textarea data-i="${i}" data-k="activity" rows="3" maxlength="600">${esc(it.activity || [it.pickup, it.dropoff].filter(Boolean).join(' → '))}</textarea></label>
       <label class="wide">Comments / extra charges<input data-i="${i}" data-k="comments" maxlength="300" value="${esc(it.comments)}"></label>`
-      : `${inp(i, 'flight', 'Flight')}${inp(i, 'airline', 'Airline')}${inp(i, 'date', 'Date', 'date')}${inp(i, 'time', 'Time', 'time')}${inp(i, 'guests', 'Guests', 'number', 'min="0"')}${veh(i, it)}${inp(i, 'rate', 'Rate', 'number', 'min="0" step="0.01"')}`}
+      : `${inp(i, 'flight', 'Flight')}${inp(i, 'airline', 'Airline')}${inp(i, 'date', 'Date', 'date')}${inp(i, 'time', 'Time', 'time')}${inp(i, 'guests', 'Guests', 'number', 'min="0"')}${inp(i, 'rate', 'Rate', 'number', 'min="0" step="0.01"')}${veh(i, it)}`}
       <button type="button" class="danger" data-rm="${i}" aria-label="Remove line">✕</button></div>`).join('');
     totals();
   };
   if (!agr) {
     paint();
-    $('#items').oninput = (e) => { const t = e.target; if (!t.dataset.i) return; if (t.dataset.k === 'rate') { liveMoney(t); items[t.dataset.i].rate = parseNum(t.value); } else items[t.dataset.i][t.dataset.k] = t.value; if (t.dataset.k === 'section') paint(); else totals(); };
-    $('#items').onclick = (e) => { if (e.target.dataset.rm !== undefined) { items.splice(e.target.dataset.rm, 1); if (!items.length) items.push(newItem()); paint(); } };
+    $('#items').oninput = (e) => { const t = e.target; if (!t.dataset.i) return; if (t.dataset.fk) { items[t.dataset.i].fleet[t.dataset.j][t.dataset.fk] = t.value; return; } if (t.dataset.k === 'rate') { liveMoney(t); items[t.dataset.i].rate = parseNum(t.value); } else items[t.dataset.i][t.dataset.k] = t.value; if (t.dataset.k === 'section') paint(); else totals(); };
+    $('#items').onclick = (e) => { const t = e.target; if (t.dataset.fadd !== undefined) { items[t.dataset.fadd].fleet.push({ vehicle: '', qty: 1 }); return paint(); } if (t.dataset.frm) { const [i, j] = t.dataset.frm.split('.'); items[i].fleet.splice(+j, 1); return paint(); } if (e.target.dataset.rm !== undefined) { items.splice(e.target.dataset.rm, 1); if (!items.length) items.push(newItem()); paint(); } };
     $('#add').onclick = () => { items.push(newItem(items.at(-1)?.section || KIND_SECTIONS[kind][0])); paint(); };
     document.querySelector('[name=kind]').onchange = (e) => { kind = e.target.value; fit(); paint(); };
   }
@@ -767,11 +798,13 @@ async function edit(v, type, id, cid, qid) {
         const L = `Line ${n + 1}`, cm = i.section === 'colombo';
         if (!((cm ? i.activity : i.flight) || '').trim()) return bad(`${L}: enter the ${cm ? 'activity' : 'flight number'}.`, item(n, cm ? 'activity' : 'flight'));
         if (!i.date) return bad(`${L}: choose a date.`, item(n, 'date'));
-        if (!i.vehicle) return bad(`${L}: choose a vehicle.`, item(n, 'vehicle'));
+        const fv = (k) => document.querySelector(`[data-i="${n}"][data-fk="${k}"]`);
+        if (i.fleet.some((x) => !x.vehicle)) return bad(`${L}: choose a vehicle.`, fv('vehicle'));
+        if (i.fleet.some((x) => !(Number.isInteger(+x.qty) && +x.qty >= 1 && +x.qty <= 50))) return bad(`${L}: the number of vehicles must be a whole number from 1 to 50.`, fv('qty'));
         if (!(Number.isInteger(+i.guests) && +i.guests >= 1 && +i.guests <= 500)) return bad(`${L}: guests must be a whole number from 1 to 500.`, item(n, 'guests'));
         if (!(+i.rate > 0) || +i.rate > MAXAMT) return bad(`${L}: enter a rate greater than 0.`, item(n, 'rate'));
       }
-      row.items = live.map(([i]) => ({ ...i, guests: +i.guests || 0, rate: +i.rate || 0 }));
+      row.items = live.map(([i]) => { const fleet = i.fleet.map((x) => ({ vehicle: x.vehicle, qty: +x.qty })); return { ...i, fleet, vehicle: fleetText(fleet), guests: +i.guests || 0, rate: +i.rate || 0 }; });
       row.tax_rate = 0;
       row.data = { ...(d.data || {}), kind };
       row.total = calc(row.items).total;

@@ -134,3 +134,8 @@ nav a{display:inline-flex;align-items:center;min-height:40px}
   td input.cost{width:110px}
   .stat b{font-size:19px}
 }
+/* several vehicles per line / per service */
+.fleet .frow{display:grid;gap:8px;grid-template-columns:3fr 1fr auto;align-items:end;margin:4px 0}
+.fleet .frow label{margin:0}
+fieldset.unit{border:1px solid var(--line);border-radius:8px;margin:8px 0;padding:8px 12px}
+fieldset.unit legend{font-weight:600;padding:0 6px}
