@@ -107,12 +107,42 @@ begin
   end loop;
 end $fn$;
 
+-- "6:45pm", "9.30 AM", "23:30" -> a time (null when it is not a time)
+create or replace function private.time_of(x text) returns time language sql immutable as $fn$
+  select case when h between 0 and 23 and mi between 0 and 59 then make_time(h, mi, 0) end
+  from (select case when m is null then null when lower(m[3]) = 'pm' and m[1]::int < 12 then m[1]::int + 12
+                    when lower(m[3]) = 'am' and m[1]::int = 12 then 0 else m[1]::int end as h, m[2]::int as mi
+        from (select regexp_match(coalesce(x, ''), '^\s*(\d{1,2})\s*[:.]\s*(\d{2})\s*(am|pm)?', 'i') as m) a) b
+$fn$;
+
+-- Runs every 15 minutes: a service starting in 1 hour that still has no vehicle (or fewer than it needs) gets an alert. Each service is caught once.
+create or replace function private.vehicle_alerts() returns void
+language plpgsql security definer set search_path = public as $fn$
+declare t timestamp := date_trunc('minute', now() at time zone 'Asia/Colombo') + interval '1 hour'; r record;
+begin
+  for r in
+    select i, c.name as customer, q.number, private.assign_text(i) as a
+    from documents q join customers c on c.id = q.customer_id, jsonb_array_elements(q.items) i
+    where q.type = 'quotation' and q.status = 'accepted'
+      and coalesce(i->'assign'->>'status', '') not in ('cancelled', 'completed')
+      and (i->>'date') ~ '^\d{4}-\d{2}-\d{2}$' and private.time_of(i->>'time') is not null
+      and ((i->>'date')::date + private.time_of(i->>'time')) >= t and ((i->>'date')::date + private.time_of(i->>'time')) < t + interval '15 minutes'
+  loop
+    continue when r.a ~ '^🚐' and r.a !~ 'vehicles assigned$';   -- fully assigned: nothing to warn about
+    perform private.discord_post('🚨 **Starts in 1 hour:** '
+      || case r.i->>'section' when 'arrival' then 'Arrival ' || coalesce(r.i->>'flight', '') when 'departure' then 'Departure ' || coalesce(r.i->>'flight', '')
+              else split_part(coalesce(r.i->>'activity', 'Traveling'), E'\n', 1) end
+      || ' at ' || (r.i->>'time') || ' – ' || coalesce(r.i->>'guests', '?') || ' pax – ' || coalesce(nullif(r.i->>'vehicle', ''), 'vehicle not chosen')
+      || ' – ' || r.customer || ' (' || r.number || ')' || E'\n' || r.a || E'\nAssign the vehicle and driver on the Schedule page now.');
+  end loop;
+end $fn$;
+
 -- The "Send a test to Discord" button on the Settings page. Signed-in users only.
 create or replace function public.discord_test() returns text
 language plpgsql security definer set search_path = public as $fn$
 begin
   if not exists (select 1 from settings where id = 1 and discord_webhook ~ '^https://(discord|discordapp)\.com/api/webhooks/') then return 'no-webhook'; end if;
-  perform private.discord_post('✅ Shammi Travels reminders are connected. You will get today''s services at 7:00 am, tomorrow''s at 6:00 pm, payments due, and an alert 3 hours before each flight.');
+  perform private.discord_post('✅ Shammi Travels reminders are connected. You will get today''s services at 7:00 am, tomorrow''s at 6:00 pm, payments due, an alert 3 hours before each flight, and an alert 1 hour before any service that still has no vehicle.');
   perform private.daily_digest('today');
   perform private.daily_digest('tomorrow');
   return 'sent';
@@ -124,3 +154,4 @@ grant execute on function public.discord_test() to authenticated;
 select cron.schedule('shammi-today', '30 1 * * *', 'select private.daily_digest(''today'')');
 select cron.schedule('shammi-tomorrow', '30 12 * * *', 'select private.daily_digest(''tomorrow'')');
 select cron.schedule('shammi-flights', '*/15 * * * *', 'select private.flight_alerts()');
+select cron.schedule('shammi-vehicles', '*/15 * * * *', 'select private.vehicle_alerts()');

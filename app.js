@@ -195,7 +195,7 @@ async function settings(v) {
     <label>Bank details (one line each, e.g. “Bank: …”, “Account Number: …”)<textarea name="bank" rows="7" maxlength="1000">${esc(S.bank)}</textarea></label>
     <label>Discord webhook URL (booking reminders are posted to this channel)
       <input name="discord_webhook" type="url" autocomplete="off" maxlength="300" pattern="https://(discord|discordapp)\\.com/api/webhooks/.+" title="A Discord webhook link: https://discord.com/api/webhooks/…" value="${esc(S.discord_webhook)}" placeholder="https://discord.com/api/webhooks/…"></label>
-    <p class="muted">Posts today's services at 7:00 am, tomorrow's at 6:00 pm, payments due, and an alert 3 hours before each flight (Sri Lanka time). Save, then <button type="button" id="dtest">Send a test to Discord</button> <span id="dok" role="status"></span></p>
+    <p class="muted">Posts today's services at 7:00 am, tomorrow's at 6:00 pm, payments due, an alert 3 hours before each flight, and an alert 1 hour before any service that still has no vehicle (Sri Lanka time). Save, then <button type="button" id="dtest">Send a test to Discord</button> <span id="dok" role="status"></span></p>
     <details class="guide"><summary>How to get the Discord webhook link</summary>
       <ol><li>Open Discord and pick the server and channel where reminders should appear (create a private channel such as <b>#bookings</b> first if you like).</li>
         <li>Click the gear next to the channel name (<b>Edit Channel</b>) → <b>Integrations</b> → <b>Webhooks</b> → <b>New Webhook</b>.</li>
