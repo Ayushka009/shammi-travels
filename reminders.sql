@@ -34,7 +34,7 @@ create or replace function private.assign_text(i jsonb) returns text language sq
     select greatest(1, coalesce(sum(greatest(1, coalesce((fl->>'qty')::numeric, 1))) filter (where coalesce(fl->>'vehicle', '') <> ''), 1))::int as n
     from jsonb_array_elements(case when jsonb_typeof(i->'fleet') = 'array' then i->'fleet' else '[]'::jsonb end) fl
   )
-  select case when (select count(*) from u) = 0 then '⚠️ NOT ASSIGNED'
+  select case when (select count(*) from u) = 0 then case when i->'assign'->>'status' = 'booking completed' then '📋 Booking completed, vehicle to be assigned' else '⚠️ NOT ASSIGNED' end
     else '🚐 ' || (select string_agg(t, '; ' order by k) from u)
       || case when (select n from need) > (select count(*) from u) then ' – ⚠️ ' || (select count(*) from u) || ' of ' || (select n from need) || ' vehicles assigned' else '' end end
 $fn$;

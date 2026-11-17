@@ -112,6 +112,8 @@ a.btnlink.primary{background:var(--brand);border-color:var(--brand);color:#fff}
 /* ---- schedule ---- */
 .badge{font-size:12px;padding:2px 10px;border-radius:999px;border:1px solid var(--line);white-space:nowrap}
 .badge.s-unassigned{color:var(--danger);border-color:var(--danger)}
+.badge.s-bookingcompleted{color:#b26a00;border-color:#b26a00}
+@media (prefers-color-scheme:dark){.badge.s-bookingcompleted{color:#ffb74d;border-color:#ffb74d}}
 .badge.s-confirmed,.badge.s-completed,.badge.s-ontheway{color:var(--brand);border-color:var(--brand)}
 .trip p{margin:6px 0}.tripbtns{display:flex;flex-wrap:wrap;gap:8px}.tripbtns:empty{display:none}
 h3.day{margin:20px 0 8px}

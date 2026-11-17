@@ -452,7 +452,8 @@ async function providers(v) {
 
 /* ---------- schedule: every service line of the accepted quotations, with the vehicle and driver assigned to it ---------- */
 // The assignment is stored on the quotation line itself (like its cost), as `assign`.
-const ASTATUS = ['unassigned', 'assigned', 'confirmed', 'on the way', 'completed', 'cancelled'];
+// 'booking completed' = reserved with the provider, vehicle and driver to be assigned about an hour before the ride
+const ASTATUS = ['unassigned', 'booking completed', 'assigned', 'confirmed', 'on the way', 'completed', 'cancelled'];
 const lineTitle = (i) => i.section === 'colombo' ? String(i.activity || [i.pickup, i.dropoff].filter(Boolean).join(' → ') || 'Traveling').split('\n')[0] : `${i.section === 'departure' ? 'Departure' : 'Arrival'} ${i.flight || ''}`.trim();
 // Several vehicles per service: the first is stored flat on `assign` (the reminders read it), the rest in `assign.more`.
 const unitsOf = (a) => [a, ...(a.more || [])].filter((u) => u && (u.provider || u.vehicle_no || u.driver || u.driver_phone));
@@ -487,7 +488,7 @@ async function scheduleView(v, mode) {
   const lines = docs.flatMap((d) => (d.items || []).map((it, idx) => ({ d, it, idx, a: it.assign || {} })))
     .filter((l) => l.it.date && (past ? l.it.date < today() || st(l) === 'completed' : l.it.date >= today() && st(l) !== 'completed')) // completed services move to Past
     .sort((x, y) => (past ? -1 : 1) * x.it.date.localeCompare(y.it.date) || timeMin(x.it.time) - timeMin(y.it.time));
-  const open = lines.filter((l) => st(l) === 'unassigned').length;
+  const open = lines.filter((l) => st(l) === 'unassigned').length, booked = lines.filter((l) => st(l) === 'booking completed').length;
   const fld = (name, label, val, attrs = '') => `<label>${label}<input name="${name}" value="${esc(val)}" ${attrs}></label>`;
   // u = one vehicle (for that driver's own message); without it the customer's message lists every vehicle
   const tripCtx = (l, u) => {
@@ -546,7 +547,7 @@ async function scheduleView(v, mode) {
   v.innerHTML = `<div class="row"><h2>Schedule</h2><span>${S.flight_api_key && !past ? '<button type="button" id="fnow">Check the next flight now</button> ' : ''}<a href="#/schedule${past ? '' : '/past'}"><button>${past ? 'Show upcoming' : 'Show past'}</button></a></span></div>
     <p id="fmsg" class="muted" role="status"></p>
     <datalist id="plist"><option value="Own vehicle">${provs.map((p) => `<option value="${esc(p.name)}">`).join('')}</datalist>
-    <p class="muted">${lines.length} ${past ? 'past' : 'upcoming'} service${lines.length === 1 ? '' : 's'} from accepted quotations${past ? '' : ` · <span class="${open ? 'neg' : ''}">${open} not assigned</span>`}</p>
+    <p class="muted">${lines.length} ${past ? 'past' : 'upcoming'} service${lines.length === 1 ? '' : 's'} from accepted quotations${past ? '' : ` · <span class="${open ? 'neg' : ''}">${open} not assigned</span>${booked ? ` · <span>${booked} booked, vehicle to be assigned</span>` : ''}`}</p>
     ${days.length ? days.map((day) => `<h3 class="day">${esc(fdate(day))}${day === today() ? ' · Today' : ''}</h3>${lines.filter((l) => l.it.date === day).map((l) => card(l, lines.indexOf(l))).join('')}`).join('')
       : `<p class="muted">Nothing ${past ? 'in the past' : 'coming up'}. Services appear here once a quotation is set to accepted.</p>`}`;
   const syncWa = (ta) => { const a = v.querySelector(`[data-wa="${ta.id}"]`); if (a) a.href = `https://wa.me/${ta.dataset.phone}?text=${encodeURIComponent(ta.value)}`; };
@@ -603,7 +604,7 @@ async function scheduleView(v, mode) {
     const filled = units.some((u) => u.provider || u.vehicle_no || u.driver || u.driver_phone);
     const a = { provider: '', vehicle_no: '', driver: '', driver_phone: '', track_url: '', ...(units[0] || {}), status: f.status.value, note: f.note.value.trim().replace(/\s+/g, ' ') };
     if (units.length > 1) a.more = units.slice(1);
-    if (a.status === 'unassigned' && filled) a.status = 'assigned';
+    if (['unassigned', 'booking completed'].includes(a.status) && filled) a.status = 'assigned'; // a vehicle was entered
     if (['assigned', 'confirmed', 'on the way'].includes(a.status) && !filled) return (err.textContent = 'Enter the provider, vehicle number or driver first.');
     try {
       const fresh = await q(sb.from('documents').select('items').eq('id', f.dataset.doc).single()), idx = +f.dataset.idx;
