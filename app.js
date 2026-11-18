@@ -501,12 +501,13 @@ async function scheduleView(v, mode) {
   // u = one vehicle (for that driver's own message); without it the customer's message lists every vehicle
   const tripCtx = (l, u) => {
     const { it, d } = l, c = d.customers || {}, fu = flightUrl(it), us = u ? [u] : unitsOf(l.a), many = us.length > 1, a = us[0] || {};
-    const tag = (x) => many ? `${[x.type, x.vehicle_no].filter(Boolean).join(' ')}: ` : '';
     return { customer: c.name || '', business: S.name || '', signatory: S.signatory || 'Ayushka Weerasinghe', phone: S.phone || '', driver: us.map((x) => x.driver).filter(Boolean).join(', '), customer_phone: c.phone || '',
       trip_what: lineTitle(it), trip_date: fdate(it.date), trip_time: it.time || 'time to be confirmed', trip_guests: String(it.guests ?? ''), trip_vehicle: it.vehicle || '',
       trip_details: it.section === 'colombo' ? String(it.activity || '') : '',
-      vehicle_line: many ? `Vehicles: ${[it.vehicle, us.map((x) => x.vehicle_no).filter(Boolean).join(', ')].filter(Boolean).join(' – ')}` : [(u && a.type || it.vehicle) && `Vehicle: ${u && a.type || it.vehicle}`, a.vehicle_no].filter(Boolean).join(' ').replace(/^$/, ''),
-      driver_line: us.filter((x) => x.driver).map((x) => `${tag(x)}Driver: *${x.driver}*${x.driver_phone ? ` (${x.driver_phone})` : ''}`).join('\n'),
+      vehicle_line: many ? '' : [(u && a.type || it.vehicle) && `Vehicle: ${u && a.type || it.vehicle}`, a.vehicle_no].filter(Boolean).join(' ').replace(/^$/, ''),
+      // several vehicles: one block each, "Van 9 Seater PI-1788:" then its driver, blocks separated by a blank line
+      driver_line: many ? us.map((x) => [`${[x.type, x.vehicle_no].filter(Boolean).join(' ') || 'Vehicle'}:`, x.driver && `Driver: *${x.driver}*${x.driver_phone ? ` (${x.driver_phone})` : ''}`].filter(Boolean).join('\n')).join('\n\n')
+        : us.filter((x) => x.driver).map((x) => `Driver: *${x.driver}*${x.driver_phone ? ` (${x.driver_phone})` : ''}`).join('\n'),
       track_line: us.filter((x) => x.track_url).map((x) => `${many ? 'Live location (' + (x.vehicle_no || x.type || 'vehicle') + '): ' : 'Live location: '}${x.track_url}`).join('\n'), flight_line: fu ? `Flight status: ${fu}` : '', trip_note_line: l.a.note ? `Note: ${l.a.note}` : '' };
   };
   const msgBlock = (l, n) => {
