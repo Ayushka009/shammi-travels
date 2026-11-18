@@ -39,20 +39,28 @@ create or replace function private.assign_text(i jsonb) returns text language sq
       || case when (select n from need) > (select count(*) from u) then ' – ⚠️ ' || (select count(*) from u) || ' of ' || (select n from need) || ' vehicles assigned' else '' end end
 $fn$;
 
+-- Airport drops: date/time are the flight's; pickup_date/pickup_time ("Leave hotel by") is when the vehicle is needed.
+create or replace function private.svc_date(i jsonb) returns text language sql immutable as $fn$
+  select case when i->>'section' = 'departure' and coalesce(i->>'pickup_date', '') ~ '^\d{4}-\d{2}-\d{2}$' and coalesce(i->>'pickup_time', '') <> '' then i->>'pickup_date' else i->>'date' end
+$fn$;
+create or replace function private.svc_time(i jsonb) returns text language sql immutable as $fn$
+  select case when i->>'section' = 'departure' and coalesce(i->>'pickup_date', '') ~ '^\d{4}-\d{2}-\d{2}$' and coalesce(i->>'pickup_time', '') <> '' then i->>'pickup_time' else i->>'time' end
+$fn$;
+
 -- The services of one day, from accepted quotations, one line each.
 create or replace function private.services_text(d date) returns text
 language sql security definer set search_path = public as $fn$
   select string_agg(line, E'\n' order by srt, line) from (
-    select coalesce(nullif(i->>'time', ''), 'zz') as srt,
-      '• ' || coalesce(nullif(i->>'time', ''), 'time not set') || ' – '
+    select coalesce(nullif(private.svc_time(i), ''), 'zz') as srt,
+      '• ' || coalesce(nullif(private.svc_time(i), ''), 'time not set') || ' – '
       || case i->>'section' when 'arrival' then 'Arrival ' || coalesce(i->>'flight', '')
-                            when 'departure' then 'Departure ' || coalesce(i->>'flight', '')
+                            when 'departure' then 'Departure ' || coalesce(i->>'flight', '') || case when private.svc_time(i) is distinct from i->>'time' then ' (flight ' || coalesce(i->>'time', '?') || ')' else '' end
                             else split_part(coalesce(i->>'activity', 'Traveling'), E'\n', 1) end
       || ' – ' || coalesce(i->>'guests', '?') || ' pax – ' || coalesce(nullif(i->>'vehicle', ''), 'vehicle not chosen')
       || ' – ' || c.name || ' (' || q.number || ')'
       || ' – ' || private.assign_text(i) as line
     from documents q join customers c on c.id = q.customer_id, jsonb_array_elements(q.items) i
-    where q.type = 'quotation' and q.status = 'accepted' and i->>'date' = d::text
+    where q.type = 'quotation' and q.status = 'accepted' and private.svc_date(i) = d::text
       and coalesce(i->'assign'->>'status', '') <> 'cancelled'
   ) s
 $fn$;
@@ -125,14 +133,14 @@ begin
     from documents q join customers c on c.id = q.customer_id, jsonb_array_elements(q.items) i
     where q.type = 'quotation' and q.status = 'accepted'
       and coalesce(i->'assign'->>'status', '') not in ('cancelled', 'completed')
-      and (i->>'date') ~ '^\d{4}-\d{2}-\d{2}$' and private.time_of(i->>'time') is not null
-      and ((i->>'date')::date + private.time_of(i->>'time')) >= t and ((i->>'date')::date + private.time_of(i->>'time')) < t + interval '15 minutes'
+      and private.svc_date(i) ~ '^\d{4}-\d{2}-\d{2}$' and private.time_of(private.svc_time(i)) is not null
+      and (private.svc_date(i)::date + private.time_of(private.svc_time(i))) >= t and (private.svc_date(i)::date + private.time_of(private.svc_time(i))) < t + interval '15 minutes'
   loop
     continue when r.a ~ '^🚐' and r.a !~ 'vehicles assigned$';   -- fully assigned: nothing to warn about
     perform private.discord_post('🚨 **Starts in 1 hour:** '
       || case r.i->>'section' when 'arrival' then 'Arrival ' || coalesce(r.i->>'flight', '') when 'departure' then 'Departure ' || coalesce(r.i->>'flight', '')
               else split_part(coalesce(r.i->>'activity', 'Traveling'), E'\n', 1) end
-      || ' at ' || (r.i->>'time') || ' – ' || coalesce(r.i->>'guests', '?') || ' pax – ' || coalesce(nullif(r.i->>'vehicle', ''), 'vehicle not chosen')
+      || ' at ' || private.svc_time(r.i) || ' – ' || coalesce(r.i->>'guests', '?') || ' pax – ' || coalesce(nullif(r.i->>'vehicle', ''), 'vehicle not chosen')
       || ' – ' || r.customer || ' (' || r.number || ')' || E'\n' || r.a || E'\nAssign the vehicle and driver on the Schedule page now.');
   end loop;
 end $fn$;

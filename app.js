@@ -17,7 +17,7 @@ const kindOf = (d) => {
   return s.has('c') && s.has('a') ? 'both' : s.has('c') ? 'colombo' : 'airport';
 };
 const vehicleSelect = (attrs, cur) => `<select ${attrs}><option value="">Select…</option>${(VEHICLES.includes(cur) || !cur ? VEHICLES : [cur, ...VEHICLES]).map((o) => `<option ${o === cur ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
-const newItem = (section = 'arrival') => ({ section, flight: '', airline: '', activity: '', comments: '', pickup: '', dropoff: '', date: '', time: '', guests: 1, vehicle: '', fleet: [{ vehicle: '', qty: 1 }], rate: 0 });
+const newItem = (section = 'arrival') => ({ section, flight: '', airline: '', activity: '', comments: '', pickup: '', dropoff: '', date: '', time: '', guests: 1, vehicle: '', fleet: [{ vehicle: '', qty: 1 }], pickup_date: '', pickup_time: '', rate: 0 });
 // A line can need several vehicles, e.g. 4 vans + 2 buses: `fleet` is the list, `vehicle` its printed text.
 const fleetOf = (i) => Array.isArray(i.fleet) && i.fleet.length ? i.fleet : [{ vehicle: i.vehicle || '', qty: 1 }];
 const fleetText = (f) => f.filter((x) => x.vehicle).map((x) => (+x.qty > 1 ? `${+x.qty} × ` : '') + x.vehicle).join(' + ');
@@ -465,6 +465,10 @@ const parseChauffeurs = (t) => String(t || '').split(/(?=Your\s+Chauff\w*)/i).ma
     driver: g(/Chauff\w*\s+([A-Za-z .'-]+?)\s+in\s/i).toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()),
     driver_phone: g(/Mobile\s*:?\s*(\+?[\d ]{7,20})/i).replace(/\s+/g, ' '), ref: g(/Booking\s*Ref\s*:?\s*([A-Z0-9-]+)/i).toUpperCase() };
 }).filter((u) => u.vehicle_no || u.driver || u.driver_phone);
+// Airport drops: `date`/`time` are the flight's; the hotel pick-up (`pickup_date`/`pickup_time`, "Leave hotel by") is when the vehicle is needed.
+const hasPickup = (i) => i.section === 'departure' && !!i.pickup_date && !!i.pickup_time;
+const svcDate = (i) => hasPickup(i) ? i.pickup_date : i.date;
+const svcTime = (i) => hasPickup(i) ? i.pickup_time : i.time;
 const lineKey = (i) => [i.section, i.date, i.time, i.flight, i.activity].map((x) => x || '').join('|');
 const flightUrl = (i) => { const c = String(i.flight || '').replace(/\s+/g, '').toLowerCase(); return i.section !== 'colombo' && /^[a-z0-9]{2}\d{1,4}[a-z]?$/.test(c) ? `https://www.flightradar24.com/data/flights/${c}` : ''; };
 // "23:30", "6:45pm", "9.30 AM", "12. 00 Noon" -> minutes after midnight (unknown times sort last)
@@ -494,15 +498,15 @@ async function scheduleView(v, mode) {
   };
   const st = (l) => l.a.status || (unitsOf(l.a).length ? 'assigned' : 'unassigned');
   const lines = docs.flatMap((d) => (d.items || []).map((it, idx) => ({ d, it, idx, a: it.assign || {} })))
-    .filter((l) => l.it.date && (past ? l.it.date < today() || st(l) === 'completed' : l.it.date >= today() && st(l) !== 'completed')) // completed services move to Past
-    .sort((x, y) => (past ? -1 : 1) * x.it.date.localeCompare(y.it.date) || timeMin(x.it.time) - timeMin(y.it.time));
+    .filter((l) => svcDate(l.it) && (past ? svcDate(l.it) < today() || st(l) === 'completed' : svcDate(l.it) >= today() && st(l) !== 'completed')) // completed services move to Past
+    .sort((x, y) => (past ? -1 : 1) * svcDate(x.it).localeCompare(svcDate(y.it)) || timeMin(svcTime(x.it)) - timeMin(svcTime(y.it)));
   const open = lines.filter((l) => st(l) === 'unassigned').length, booked = lines.filter((l) => st(l) === 'booking completed').length;
   const fld = (name, label, val, attrs = '') => `<label>${label}<input name="${name}" value="${esc(val)}" ${attrs}></label>`;
   // u = one vehicle (for that driver's own message); without it the customer's message lists every vehicle
   const tripCtx = (l, u) => {
     const { it, d } = l, c = d.customers || {}, fu = flightUrl(it), us = u ? [u] : unitsOf(l.a), many = us.length > 1, a = us[0] || {};
     return { customer: c.name || '', business: S.name || '', signatory: S.signatory || 'Ayushka Weerasinghe', phone: S.phone || '', driver: us.map((x) => x.driver).filter(Boolean).join(', '), customer_phone: c.phone || '',
-      trip_what: lineTitle(it), trip_date: fdate(it.date), trip_time: it.time || 'time to be confirmed', trip_guests: String(it.guests ?? ''), trip_vehicle: it.vehicle || '',
+      trip_what: lineTitle(it), trip_date: fdate(svcDate(it)), trip_time: svcTime(it) || 'time to be confirmed', trip_guests: String(it.guests ?? ''), trip_vehicle: it.vehicle || '',
       trip_details: it.section === 'colombo' ? String(it.activity || '') : '',
       vehicle_line: many ? '' : [(u && a.type || it.vehicle) && `Vehicle: ${u && a.type || it.vehicle}`, a.vehicle_no].filter(Boolean).join(' ').replace(/^$/, ''),
       // several vehicles: one block each, "Van 9 Seater PI-1788:" then its driver, blocks separated by a blank line
@@ -537,7 +541,8 @@ async function scheduleView(v, mode) {
     const btns = us.map((u, k) => { const tel = String(u.driver_phone || '').replace(/[^\\d+]/g, ''), tag = us.length > 1 ? ` ${k + 1}` : '';
       return `${tel ? `<a class="btnlink" href="tel:${esc(tel)}">Call driver${tag}</a>` : ''} ${u.track_url ? `<a class="btnlink" href="${esc(u.track_url)}" target="_blank" rel="noopener noreferrer">Track vehicle${tag}</a>` : ''}`; }).join(' ');
     return `<div class="card trip">
-      <div class="row"><b>${esc(it.time || 'Time not set')} · ${esc(lineTitle(it))}</b><select class="badge qs s-${s.replace(/ /g, '')}" aria-label="Change status" data-doc="${d.id}" data-idx="${l.idx}" data-key="${esc(lineKey(it))}">${ASTATUS.filter((x) => x !== 'unassigned' || !us.length).map((x) => `<option ${x === s ? 'selected' : ''}>${x}</option>`).join('')}</select></div>
+      <div class="row"><b>${esc(svcTime(it) || 'Time not set')} · ${esc(lineTitle(it))}</b><select class="badge qs s-${s.replace(/ /g, '')}" aria-label="Change status" data-doc="${d.id}" data-idx="${l.idx}" data-key="${esc(lineKey(it))}">${ASTATUS.filter((x) => x !== 'unassigned' || !us.length).map((x) => `<option ${x === s ? 'selected' : ''}>${x}</option>`).join('')}</select></div>
+      ${hasPickup(it) ? `<p class="muted">Leave hotel by ${esc(svcTime(it))} · flight at ${esc(it.time || '?')} on ${esc(fdate(it.date))}</p>` : ''}
       <p class="muted">${esc(it.guests)} guests · ${esc(it.vehicle || 'vehicle not chosen')} · <a href="#/customer/${d.customer_id}">${esc(d.customers?.name)}</a> · <a href="#/view/${d.id}">${esc(d.number)}</a></p>
       ${flightLine(it)}
       ${need > 1 ? `<p class="${us.length < need ? 'neg' : 'muted'}">${us.length} of ${need} vehicles assigned</p>` : ''}
@@ -556,12 +561,12 @@ async function scheduleView(v, mode) {
           ${fld('note', 'Note', a.note, 'maxlength="200"')}
           <p class="err aerr" role="alert"></p><button class="primary">Save assignment</button></form></details></div>`;
   };
-  const days = [...new Set(lines.map((l) => l.it.date))];
+  const days = [...new Set(lines.map((l) => svcDate(l.it)))];
   v.innerHTML = `<div class="row"><h2>Schedule</h2><span>${S.flight_api_key && !past ? '<button type="button" id="fnow">Check the next flight now</button> ' : ''}<a href="#/schedule${past ? '' : '/past'}"><button>${past ? 'Show upcoming' : 'Show past'}</button></a></span></div>
     <p id="fmsg" class="muted" role="status"></p>
     <datalist id="plist"><option value="Own vehicle">${provs.map((p) => `<option value="${esc(p.name)}">`).join('')}</datalist>
     <p class="muted">${lines.length} ${past ? 'past' : 'upcoming'} service${lines.length === 1 ? '' : 's'} from accepted quotations${past ? '' : ` · <span class="${open ? 'neg' : ''}">${open} not assigned</span>${booked ? ` · <span>${booked} booked, vehicle to be assigned</span>` : ''}`}</p>
-    ${days.length ? days.map((day) => `<h3 class="day">${esc(fdate(day))}${day === today() ? ' · Today' : ''}</h3>${lines.filter((l) => l.it.date === day).map((l) => card(l, lines.indexOf(l))).join('')}`).join('')
+    ${days.length ? days.map((day) => `<h3 class="day">${esc(fdate(day))}${day === today() ? ' · Today' : ''}</h3>${lines.filter((l) => svcDate(l.it) === day).map((l) => card(l, lines.indexOf(l))).join('')}`).join('')
       : `<p class="muted">Nothing ${past ? 'in the past' : 'coming up'}. Services appear here once a quotation is set to accepted.</p>`}`;
   const syncWa = (ta) => { const a = v.querySelector(`[data-wa="${ta.id}"]`); if (a) a.href = `https://wa.me/${ta.dataset.phone}?text=${encodeURIComponent(ta.value)}`; };
   v.querySelectorAll('textarea[data-phone]').forEach((ta) => { syncWa(ta); ta.addEventListener('input', () => syncWa(ta)); });
@@ -787,7 +792,7 @@ async function edit(v, type, id, cid, qid) {
       ? `${inp(i, 'date', 'Date', 'date')}${inp(i, 'time', 'Time (e.g. 9:00am)')}${inp(i, 'guests', 'Guests', 'number', 'min="0"')}${inp(i, 'rate', 'Rate', 'number', 'min="0" step="0.01"')}${veh(i, it)}
       <label class="wide">Activity (one per line)<textarea data-i="${i}" data-k="activity" rows="3" maxlength="600">${esc(it.activity || [it.pickup, it.dropoff].filter(Boolean).join(' → '))}</textarea></label>
       <label class="wide">Comments / extra charges<input data-i="${i}" data-k="comments" maxlength="300" value="${esc(it.comments)}"></label>`
-      : `${inp(i, 'flight', 'Flight')}${inp(i, 'airline', 'Airline')}${inp(i, 'date', 'Date', 'date')}${inp(i, 'time', 'Time', 'time')}${inp(i, 'guests', 'Guests', 'number', 'min="0"')}${inp(i, 'rate', 'Rate', 'number', 'min="0" step="0.01"')}${veh(i, it)}`}
+      : `${inp(i, 'flight', 'Flight')}${inp(i, 'airline', 'Airline')}${inp(i, 'date', 'Date', 'date')}${inp(i, 'time', it.section === 'departure' ? 'Flight time' : 'Time', 'time')}${it.section === 'departure' ? `${inp(i, 'pickup_date', 'Leave hotel: date', 'date')}${inp(i, 'pickup_time', 'Leave hotel by', 'time')}` : ''}${inp(i, 'guests', 'Guests', 'number', 'min="0"')}${inp(i, 'rate', 'Rate', 'number', 'min="0" step="0.01"')}${veh(i, it)}`}
       <button type="button" class="danger" data-rm="${i}" aria-label="Remove line">✕</button></div>`).join('');
     totals();
   };
@@ -863,13 +868,15 @@ async function edit(v, type, id, cid, qid) {
         const L = `Line ${n + 1}`, cm = i.section === 'colombo';
         if (!((cm ? i.activity : i.flight) || '').trim()) return bad(`${L}: enter the ${cm ? 'activity' : 'flight number'}.`, item(n, cm ? 'activity' : 'flight'));
         if (!i.date) return bad(`${L}: choose a date.`, item(n, 'date'));
+        if (i.section === 'departure' && !!i.pickup_date !== !!i.pickup_time) return bad(`${L}: enter both the hotel pick-up date and time, or leave both empty.`, item(n, i.pickup_date ? 'pickup_time' : 'pickup_date'));
+        if (i.section === 'departure' && i.pickup_date && i.pickup_date > i.date) return bad(`${L}: the hotel pick-up cannot be after the flight date.`, item(n, 'pickup_date'));
         const fv = (k) => document.querySelector(`[data-i="${n}"][data-fk="${k}"]`);
         if (i.fleet.some((x) => !x.vehicle)) return bad(`${L}: choose a vehicle.`, fv('vehicle'));
         if (i.fleet.some((x) => !(Number.isInteger(+x.qty) && +x.qty >= 1 && +x.qty <= 50))) return bad(`${L}: the number of vehicles must be a whole number from 1 to 50.`, fv('qty'));
         if (!(Number.isInteger(+i.guests) && +i.guests >= 1 && +i.guests <= 500)) return bad(`${L}: guests must be a whole number from 1 to 500.`, item(n, 'guests'));
         if (!(+i.rate > 0) || +i.rate > MAXAMT) return bad(`${L}: enter a rate greater than 0.`, item(n, 'rate'));
       }
-      row.items = live.map(([i]) => { const fleet = i.fleet.map((x) => ({ vehicle: x.vehicle, qty: +x.qty })); return { ...i, fleet, vehicle: fleetText(fleet), guests: +i.guests || 0, rate: +i.rate || 0 }; });
+      row.items = live.map(([i]) => { const fleet = i.fleet.map((x) => ({ vehicle: x.vehicle, qty: +x.qty })); return { ...i, ...(i.section === 'departure' ? {} : { pickup_date: '', pickup_time: '' }), fleet, vehicle: fleetText(fleet), guests: +i.guests || 0, rate: +i.rate || 0 }; });
       row.tax_rate = 0;
       row.data = { ...(d.data || {}), kind };
       row.total = calc(row.items).total;
@@ -1137,10 +1144,10 @@ async function view(v, id) {
     const rows = d.items.filter((i) => i.section === key);
     if (!rows.length) return '';
     const cm = key === 'colombo';
-    const head = (cm ? '<th>Date</th><th>Time</th><th>Activity</th><th>Guests</th><th>Vehicle</th><th class="r">Rate</th><th>Comments</th>' : '<th>Flight</th><th>Airline</th><th>Date</th><th>Time (CMB)</th><th>Guests</th><th>Vehicle</th><th class="r">Rate</th>').replace('>Rate<', `>${RL}<`);
+    const head = (cm ? '<th>Date</th><th>Time</th><th>Activity</th><th>Guests</th><th>Vehicle</th><th class="r">Rate</th><th>Comments</th>' : '<th>Flight</th><th>Airline</th><th>Date</th><th>Time (CMB)</th>' + (key === 'departure' ? '<th>Leave hotel by</th>' : '') + '<th>Guests</th><th>Vehicle</th><th class="r">Rate</th>').replace('>Rate<', `>${RL}<`);
     const row = (i) => cm
       ? `<td>${esc(fdate(i.date))}</td><td>${esc(i.time)}</td><td class="act">${esc(i.activity || [i.pickup, i.dropoff].filter(Boolean).join(' → '))}</td><td>${esc(i.guests)}</td><td>${esc(i.vehicle)}</td><td class="r">${money(i.rate)}</td><td class="act">${esc(i.comments)}</td>`
-      : `<td>${esc(i.flight)}</td><td>${esc(i.airline)}</td><td>${esc(fdate(i.date))}</td><td>${esc(i.time)}</td><td>${esc(i.guests)}</td><td>${esc(i.vehicle)}</td><td class="r">${money(i.rate)}</td>`;
+      : `<td>${esc(i.flight)}</td><td>${esc(i.airline)}</td><td>${esc(fdate(i.date))}</td><td>${esc(i.time)}</td>${key === 'departure' ? `<td>${hasPickup(i) ? `${esc(fdate(i.pickup_date))}, ${esc(i.pickup_time)}` : '—'}</td>` : ''}<td>${esc(i.guests)}</td><td>${esc(i.vehicle)}</td><td class="r">${money(i.rate)}</td>`;
     return `<h3 class="sec">${SECTIONS[key].toUpperCase()}</h3><table class="rates"><thead><tr>${head}</tr></thead><tbody>${rows.map((i) => `<tr>${row(i)}</tr>`).join('')}</tbody></table>`;
   };
   const nClauses = (String(f.terms || '').match(/^# /gm) || []).length, signNo = nClauses ? nClauses + 1 : 21; // follows the last clause in the terms
