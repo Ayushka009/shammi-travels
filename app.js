@@ -457,6 +457,14 @@ const ASTATUS = ['unassigned', 'booking completed', 'assigned', 'confirmed', 'on
 const lineTitle = (i) => i.section === 'colombo' ? String(i.activity || [i.pickup, i.dropoff].filter(Boolean).join(' → ') || 'Traveling').split('\n')[0] : `${i.section === 'departure' ? 'Departure' : 'Arrival'} ${i.flight || ''}`.trim();
 // Several vehicles per service: the first is stored flat on `assign` (the reminders read it), the rest in `assign.more`.
 const unitsOf = (a) => [a, ...(a.more || [])].filter((u) => u && (u.provider || u.vehicle_no || u.driver || u.driver_phone));
+// Reads "Your Chauffer GAYAN in a TOYOTA KDH will pick you… Plate No… Mobile… Booking Ref… Category: 9 Seater" confirmations (one or several pasted together)
+const parseChauffeurs = (t) => String(t || '').split(/(?=Your\s+Chauff\w*)/i).map((b) => {
+  const g = (re) => (b.match(re) || [])[1]?.trim() || '', cat = g(/Category\s*:?\s*(\d+)\s*Seater/i);
+  return { type: cat === '9' ? 'Van 9 Seater' : cat === '14' ? 'Van 14 Seater' : '', provider: 'Kangaroo Cabs',
+    vehicle_no: g(/Plate\s*No\.?\s*:?\s*([A-Z0-9][A-Z0-9 -]{2,14}?)\s*(?:Mobile|\n|$)/i).toUpperCase(),
+    driver: g(/Chauff\w*\s+([A-Za-z .'-]+?)\s+in\s/i).toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()),
+    driver_phone: g(/Mobile\s*:?\s*(\+?[\d ]{7,20})/i).replace(/\s+/g, ' '), ref: g(/Booking\s*Ref\s*:?\s*([A-Z0-9-]+)/i).toUpperCase() };
+}).filter((u) => u.vehicle_no || u.driver || u.driver_phone);
 const lineKey = (i) => [i.section, i.date, i.time, i.flight, i.activity].map((x) => x || '').join('|');
 const flightUrl = (i) => { const c = String(i.flight || '').replace(/\s+/g, '').toLowerCase(); return i.section !== 'colombo' && /^[a-z0-9]{2}\d{1,4}[a-z]?$/.test(c) ? `https://www.flightradar24.com/data/flights/${c}` : ''; };
 // "23:30", "6:45pm", "9.30 AM", "12. 00 Noon" -> minutes after midnight (unknown times sort last)
@@ -517,7 +525,8 @@ async function scheduleView(v, mode) {
       ${ufld('provider', 'Provider', u.provider, 'list="plist" maxlength="120" autocomplete="off" placeholder="Own vehicle or a provider"')}
       ${ufld('vehicle_no', 'Vehicle number', u.vehicle_no, 'maxlength="20" autocomplete="off" placeholder="e.g. WP CAB-1234"')}
       ${ufld('driver', 'Driver name', u.driver, 'maxlength="80"')}
-      ${ufld('driver_phone', 'Driver phone', u.driver_phone, 'type="tel" maxlength="20"')}</div>
+      ${ufld('driver_phone', 'Driver phone', u.driver_phone, 'type="tel" maxlength="20"')}
+      ${ufld('ref', 'Booking reference', u.ref, 'maxlength="30" autocomplete="off" placeholder="e.g. VAS2792"')}</div>
     ${ufld('track_url', 'Live location link (the driver\'s Google Maps or WhatsApp live-location share link)', u.track_url, 'type="url" maxlength="300" placeholder="https://maps.app.goo.gl/…"')}
     <button type="button" class="mini danger" data-urm>Remove this vehicle</button></fieldset>`;
   const card = (l, n) => {
@@ -531,7 +540,7 @@ async function scheduleView(v, mode) {
       <p class="muted">${esc(it.guests)} guests · ${esc(it.vehicle || 'vehicle not chosen')} · <a href="#/customer/${d.customer_id}">${esc(d.customers?.name)}</a> · <a href="#/view/${d.id}">${esc(d.number)}</a></p>
       ${flightLine(it)}
       ${need > 1 ? `<p class="${us.length < need ? 'neg' : 'muted'}">${us.length} of ${need} vehicles assigned</p>` : ''}
-      ${us.length ? us.map((u) => `<p>${esc([u.type, u.provider, u.vehicle_no, u.driver, u.driver_phone].filter(Boolean).join(' · '))}</p>`).join('') : '<p><span class="neg">No vehicle assigned yet</span></p>'}${a.note ? `<p class="muted">${esc(a.note)}</p>` : ''}
+      ${us.length ? us.map((u) => `<p>${esc([u.type, u.provider, u.vehicle_no, u.driver, u.driver_phone, u.ref && `Ref ${u.ref}`].filter(Boolean).join(' · '))}</p>`).join('') : '<p><span class="neg">No vehicle assigned yet</span></p>'}${a.note ? `<p class="muted">${esc(a.note)}</p>` : ''}
       <p class="tripbtns">${fu ? `<a class="btnlink" href="${fu}" target="_blank" rel="noopener noreferrer">Track flight ${esc(it.flight)}</a>` : ''}${btns}</p>
       ${msgBlock(l, n)}
       <details class="guide"><summary>${us.length ? 'Change assignment' : need > 1 ? `Assign ${need} vehicles` : 'Assign a vehicle'}</summary>
@@ -539,6 +548,9 @@ async function scheduleView(v, mode) {
         <form class="af" data-doc="${d.id}" data-idx="${l.idx}" data-key="${esc(lineKey(it))}" data-tid="${tid}" novalidate>
           <div class="units">${rows.map((u, k) => unitForm(u, k, tid)).join('')}</div>
           <p><button type="button" data-uadd>+ Add another vehicle</button></p>
+          <details class="guide"><summary>Paste driver confirmations (Kangaroo Cabs)</summary>
+            <label>Paste one or more “Your Chauffer … will pick you shortly” messages<textarea class="paste" rows="6" maxlength="3000"></textarea></label>
+            <p><button type="button" data-paste>Fill the vehicles from this text</button> <span class="muted pmsg" role="status"></span></p></details>
           <div class="grid"><label>Status <select name="status">${ASTATUS.map((x) => `<option ${x === s ? 'selected' : ''}>${x}</option>`).join('')}</select></label></div>
           ${fld('note', 'Note', a.note, 'maxlength="200"')}
           <p class="err aerr" role="alert"></p><button class="primary">Save assignment</button></form></details></div>`;
@@ -575,7 +587,17 @@ async function scheduleView(v, mode) {
   v.onclick = (e) => {
     const f = e.target.closest?.('form.af'); if (!f) return;
     const number = () => f.querySelectorAll('.un').forEach((x, k) => { x.textContent = k + 1; });
-    if (e.target.dataset.uadd !== undefined) { f.querySelector('.units').insertAdjacentHTML('beforeend', unitForm({}, f.querySelectorAll('.unit').length, f.dataset.tid)); number(); }
+    if (e.target.dataset.paste !== undefined) {
+      const found = parseChauffeurs(f.querySelector('.paste').value), pm = f.querySelector('.pmsg');
+      if (!found.length) { pm.textContent = 'No driver details found in that text.'; return; }
+      const free = (fs) => !['provider', 'vehicle_no', 'driver', 'driver_phone', 'ref'].some((k) => fs.querySelector(`[data-k=${k}]`).value.trim());
+      for (const u of found) {
+        let fs = [...f.querySelectorAll('.unit')].find(free);
+        if (!fs) { f.querySelector('.units').insertAdjacentHTML('beforeend', unitForm({}, f.querySelectorAll('.unit').length, f.dataset.tid)); number(); fs = f.querySelector('.unit:last-child'); }
+        for (const [k, x] of Object.entries(u)) if (x && (k !== 'type' || !fs.querySelector('[data-k=type]').value)) fs.querySelector(`[data-k=${k}]`).value = x;
+      }
+      pm.textContent = `Filled ${found.length} vehicle${found.length === 1 ? '' : 's'}. Check them, then press Save assignment.`; f.querySelector('.paste').value = '';
+    } else if (e.target.dataset.uadd !== undefined) { f.querySelector('.units').insertAdjacentHTML('beforeend', unitForm({}, f.querySelectorAll('.unit').length, f.dataset.tid)); number(); }
     else if (e.target.dataset.urm !== undefined) { e.target.closest('.unit').remove(); number(); }
   };
   if ($('#fnow')) $('#fnow').onclick = async (e) => {
@@ -594,8 +616,8 @@ async function scheduleView(v, mode) {
     const f = e.target; if (!f.classList.contains('af')) return;
     e.preventDefault();
     const err = f.querySelector('.aerr'); err.textContent = '';
-    const units = [...f.querySelectorAll('.unit')].map((fs) => Object.fromEntries(['type', 'provider', 'vehicle_no', 'driver', 'driver_phone', 'track_url'].map((k) => [k, fs.querySelector(`[data-k=${k}]`).value.trim().replace(/\s+/g, ' ')])))
-      .filter((u) => u.provider || u.vehicle_no || u.driver || u.driver_phone || u.track_url);
+    const units = [...f.querySelectorAll('.unit')].map((fs) => Object.fromEntries(['type', 'provider', 'vehicle_no', 'driver', 'driver_phone', 'ref', 'track_url'].map((k) => [k, fs.querySelector(`[data-k=${k}]`).value.trim().replace(/\s+/g, ' ')])))
+      .filter((u) => u.provider || u.vehicle_no || u.driver || u.driver_phone || u.ref || u.track_url);
     for (const [k, u] of units.entries()) {
       const who = units.length > 1 ? `Vehicle ${k + 1}: ` : '';
       if (u.driver_phone && !/^[0-9+ ]{7,20}$/.test(u.driver_phone)) return (err.textContent = `${who}the driver phone must be 7 to 20 characters: digits, + and spaces.`);
