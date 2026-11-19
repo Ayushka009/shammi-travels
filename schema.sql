@@ -91,3 +91,7 @@ create table if not exists provider_payments (
 alter table provider_payments enable row level security;
 drop policy if exists "auth only" on provider_payments;
 create policy "auth only" on provider_payments for all to authenticated using (true) with check (true);
+
+-- billing currency per customer (documents for USD customers are shown in US$) and the monthly USD→Rs rate (CBSL selling rate on the 15th)
+alter table customers add column if not exists currency text not null default 'LKR' check (currency in ('LKR','USD'));
+alter table settings add column if not exists usd_rates jsonb not null default '{}';

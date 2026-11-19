@@ -4,6 +4,11 @@ import { CONFIG } from './config.js';
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const money = (n, min = 2) => `${n < 0 ? '-' : ''}${CONFIG.CURRENCY}${Math.abs(Number(n || 0)).toLocaleString('en-US', { minimumFractionDigits: min, maximumFractionDigits: 2 })}`;
+// Everything is stored in Rs. A customer set to USD sees documents converted at the CBSL selling rate of the 15th of the document's month (Settings, USD rates); an earlier month's rate is used if that month has none.
+const curOf = (c) => (c?.currency === 'USD' ? 'USD' : 'LKR');
+const usdFmt = (n, min = 2) => `${n < 0 ? '-' : ''}US$${Math.abs(Number(n || 0)).toLocaleString('en-US', { minimumFractionDigits: min, maximumFractionDigits: 2 })}`;
+const fxFor = (rates, iso) => { const m = String(iso || '').slice(0, 7); const k = Object.keys(rates || {}).filter((x) => x <= m && +rates[x] > 0).sort().at(-1); return k ? { month: k, rate: +rates[k] } : null; };
+let dm = money; // money formatter of the document on screen (set in view())
 const fdate = (iso) => iso ? new Date(iso + 'T00:00:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }).replace(',', '') : '';
 const ldate = (iso, sep = ' ') => iso ? new Date(iso + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }).replace(/ /g, sep) : '';
 const SECTIONS = { arrival: 'Arrival Transfers', departure: 'Departure Transfers', colombo: 'Traveling' };
@@ -98,7 +103,7 @@ $('#loginForm').onsubmit = async (e) => {
 $('#logout').onclick = () => sb.auth.signOut();
 
 /* ---------- router ---------- */
-let S = { name: 'Shammi Travels', address: '', phone: '', email: '', signatory: '', bank: '', subsidiary: '', pv: '', terms: '', discord_webhook: '', flight_api_key: '' };
+let S = { name: 'Shammi Travels', address: '', phone: '', email: '', signatory: '', bank: '', subsidiary: '', pv: '', terms: '', discord_webhook: '', flight_api_key: '', usd_rates: {} };
 let settingsLoaded = false;
 async function loadSettings() {
   if (settingsLoaded) return;
@@ -221,7 +226,25 @@ async function settings(v) {
     <label>Standard agreement terms
       <textarea name="terms" rows="14" maxlength="20000">${esc(S.terms)}</textarea></label>
     ${termsGuide}
-    <button class="primary">Save settings</button> <span id="ok" class="muted" role="status"></span></form>`;
+    <button class="primary">Save settings</button> <span id="ok" class="muted" role="status"></span></form>
+    <div class="card" id="fxc"><h3>US dollar rates</h3>
+      <p class="muted">Everything is kept in Rs. Customers billed in US$ see documents converted at the Central Bank of Sri Lanka USD selling rate on the 15th of the document's month. Enter one rate per month (rupees per US$1); a month with no rate uses the latest earlier one.</p>
+      <div class="tablewrap"><table><thead><tr><th>Month</th><th class="num">Rs per US$1</th><th></th></tr></thead><tbody>${Object.entries(S.usd_rates || {}).sort().reverse().map(([m, r]) => `<tr><td>${esc(m)}</td><td class="num">${esc(fmtNum(String(r)))}</td><td><button type="button" class="mini danger" data-fxdel="${esc(m)}">Delete</button></td></tr>`).join('') || '<tr><td colspan="3" class="muted">No rates yet.</td></tr>'}</tbody></table></div>
+      <form id="fxf" class="grid"><label>Month <input type="month" name="m" required></label><label>Selling rate on the 15th (Rs) <input name="r" inputmode="decimal" autocomplete="off" maxlength="9" required></label>
+        <div><button class="primary">Save rate</button> <span id="fxok" class="muted" role="status"></span></div></form></div>`;
+  const saveRates = async (rates) => { await q(sb.from('settings').upsert({ id: 1, usd_rates: rates })); S = { ...S, usd_rates: rates }; route(true); };
+  $('#fxf').oninput = (e) => { if (e.target.name === 'r') liveMoney(e.target); };
+  $('#fxf').onsubmit = async (e) => {
+    e.preventDefault();
+    const m = e.target.m.value, r = parseNum(e.target.r.value);
+    if (!(r > 1 && r < 10000)) return alert('Enter the rate in rupees per US$1, for example 300.50.');
+    try { await saveRates({ ...(S.usd_rates || {}), [m]: r }); } catch (err) { alert(err.message); }
+  };
+  $('#fxc').onclick = async (e) => {
+    const b = e.target.closest('[data-fxdel]'); if (!b || !confirm(`Delete the rate for ${b.dataset.fxdel}?`)) return;
+    const rates = { ...(S.usd_rates || {}) }; delete rates[b.dataset.fxdel];
+    try { await saveRates(rates); } catch (err) { alert(err.message); }
+  };
   $('#dtest').onclick = async () => {
     $('#dok').textContent = 'Sending…';
     try { const r = await q(sb.rpc('discord_test')); $('#dok').textContent = r === 'sent' ? 'Sent. Check the Discord channel.' : 'No valid webhook is saved yet: paste the link above and Save settings first.'; }
@@ -748,8 +771,13 @@ async function customer(v, id) {
   const block = (t, title) => `<div class="card"><div class="row"><h3>${title} (${by(t).length})</h3><a href="#/edit/${t}/-/${id}"><button class="primary">New ${LABEL[t].toLowerCase()}</button></a></div>${table(by(t), true)}</div>`;
   v.innerHTML = `<div class="row"><h2>${esc(c.name)}</h2><a href="#/customers"><button>All customers</button></a></div>
     <div class="card"><span class="muted">${esc([c.phone, c.email, c.address].filter(Boolean).join(' · ')) || 'No contact details'}</span></div>
+    <div class="card row"><label style="margin:0">Billing currency <select id="ccur"><option value="LKR" ${curOf(c) === 'LKR' ? 'selected' : ''}>Rs (LKR)</option><option value="USD" ${curOf(c) === 'USD' ? 'selected' : ''}>US$ (USD)</option></select></label>
+      <span class="muted" id="cok">${curOf(c) === 'USD' ? 'Documents for this customer show US$, converted from Rs at the CBSL rate of the 15th of the document month. Totals here stay in Rs.' : 'Documents show Rs.'}</span></div>
     <div class="grid"><div class="card stat"><span class="muted">Paid</span><b>${money(paidAmt)}</b></div><div class="card stat"><span class="muted">Outstanding</span><b>${money(owedAmt)}</b></div></div>
     ${block('invoice', 'Invoices')}${block('quotation', 'Quotations')}${block('agreement', 'Agreements')}`;
+  $('#ccur').onchange = async (e) => {
+    try { await q(sb.from('customers').update({ currency: e.target.value }).eq('id', id)); route(true); } catch (err) { alert(err.message); }
+  };
 }
 
 /* ---------- customers ---------- */
@@ -759,10 +787,11 @@ async function customers(v) {
     <form id="cf" class="card grid">
       <label>Name <input name="name" required maxlength="120"></label><label>Phone <input name="phone" type="tel" pattern="[0-9+ ]{7,20}" maxlength="20" title="7 to 20 characters: digits, + and spaces"></label>
       <label>Email <input name="email" type="email" maxlength="120"></label><label>Address <input name="address" maxlength="200"></label>
+      <label>Billing currency <select name="currency"><option value="LKR">Rs (LKR)</option><option value="USD">US$ (USD)</option></select></label>
       <p id="cerr" class="err" role="alert" style="grid-column:1/-1"></p>
       <div><button class="primary">Add customer</button></div></form>
-    <div class="card tablewrap"><table><thead><tr><th>Name</th><th>Phone</th><th>Email</th><th></th></tr></thead><tbody>${rows.map((c) =>
-      `<tr><td><a href="#/customer/${c.id}">${esc(c.name)}</a><br><span class="muted">${esc(c.address)}</span></td><td>${esc(c.phone)}</td><td>${esc(c.email)}</td><td><button class="danger" data-del="${c.id}">Delete</button></td></tr>`).join('')}</tbody></table></div>`;
+    <div class="card tablewrap"><table><thead><tr><th>Name</th><th>Phone</th><th>Email</th><th>Currency</th><th></th></tr></thead><tbody>${rows.map((c) =>
+      `<tr><td><a href="#/customer/${c.id}">${esc(c.name)}</a><br><span class="muted">${esc(c.address)}</span></td><td>${esc(c.phone)}</td><td>${esc(c.email)}</td><td>${curOf(c)}</td><td><button class="danger" data-del="${c.id}">Delete</button></td></tr>`).join('')}</tbody></table></div>`;
   $('#cf').onsubmit = async (e) => {
     e.preventDefault();
     const row = Object.fromEntries([...new FormData(e.target)].map(([k, x]) => [k, String(x).trim().replace(/\s+/g, ' ')]));
@@ -837,7 +866,7 @@ async function edit(v, type, id, cid, qid) {
       </div>` : ''}`}
     <label>Notes <textarea name="notes" maxlength="1000">${esc(d.notes)}</textarea></label>
     <p id="ferr" class="err" role="alert"></p>
-    <button class="primary">Save</button> <a href="#/list/${type}"><button type="button">Cancel</button></a>
+    <button class="primary">Save</button> <a href="#/list/${type}"><button type="button">Close</button></a> <span id="fok" class="muted" role="status"></span> <a id="fview" href="#/view/${id || ''}" ${id ? '' : 'hidden'}>View document</a>
   </form>`;
 
   const items = d.items.length ? d.items : [newItem()];
@@ -997,7 +1026,10 @@ async function edit(v, type, id, cid, qid) {
     try {
       const rid = id ? (await q(sb.from('documents').update(row).eq('id', id)), id) : await nextInsert(row);
       if (id && type === 'quotation') await syncLinked({ id, number: d.number, customer_id: row.customer_id, items: row.items, total: row.total, kind }).catch((e2) => alert(`Saved, but the linked agreement or invoice could not be refreshed: ${e2.message}`));
-      location.hash = `#/view/${rid}`;
+      // stay on the form: a new document becomes an edit of the saved one (URL swapped without reloading), later saves update it
+      if (!id) { id = rid; d.number = (await q(sb.from('documents').select('number').eq('id', rid).single())).number; history.replaceState(null, '', `#/edit/${type}/${rid}`); document.querySelector('h2').textContent = `Edit ${LABEL[type].toLowerCase()} ${d.number}`; $('#fview').href = `#/view/${rid}`; $('#fview').hidden = false; }
+      e.target.status.value = row.status; // an invoice with every instalment paid is marked paid on save
+      $('#fok').textContent = `Saved at ${new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}.`;
     } catch (err) { alert(err.message); }
   };
 }
@@ -1085,16 +1117,16 @@ function messageCtx(d, c, f, B, bankLines) {
   const next_service = up ? `${fdate(up.date)}${up.time ? ', ' + up.time : ''} – ${what(up)}${up.vehicle ? ` (${up.vehicle})` : ''}` : '';
   return {
     customer: c.name || '', organisation: f.company || c.name || '', business: B.name || '', subsidiary: B.subsidiary || '', signatory: B.signatory || 'Ayushka Weerasinghe', phone: B.phone || '',
-    number: d.number, type: d.type === 'agreement' ? 'Transportation Services Agreement' : LABEL[d.type], date: fdate(d.issue_date), due: d.due_date ? fdate(d.due_date) : '', total: money(d.total),
+    number: d.number, type: d.type === 'agreement' ? 'Transportation Services Agreement' : LABEL[d.type], date: fdate(d.issue_date), due: d.due_date ? fdate(d.due_date) : '', total: dm(d.total),
     quotation_ref: f.quotation ? ` (quotation ${f.quotation})` : '',
     service_dates: !dates.length ? '' : dates[0] === dates.at(-1) ? fdate(dates[0]) : `${fdate(dates[0])} – ${fdate(dates.at(-1))}`,
     next_service, next_service_line: next_service ? `Next service: ${next_service}` : '',
-    schedule: sch.map((s, i) => `${i + 1}. ${s.label} – ${r2(+s.percent)}% – ${money(s.amount)} – due ${s.due ? fdate(s.due) : '—'}${s.paid ? ' (paid)' : ''}`).join('\n'),
-    paid: inv ? money(paid) : '', balance: inv ? money(r2(Number(d.total) - paid)) : '',
-    next_label: next?.label || '', next_amount: next ? money(next.amount) : '', next_date: next?.due ? fdate(next.due) : '',
+    schedule: sch.map((s, i) => `${i + 1}. ${s.label} – ${r2(+s.percent)}% – ${dm(s.amount)} – due ${s.due ? fdate(s.due) : '—'}${s.paid ? ' (paid)' : ''}`).join('\n'),
+    paid: inv ? dm(paid) : '', balance: inv ? dm(r2(Number(d.total) - paid)) : '',
+    next_label: next?.label || '', next_amount: next ? dm(next.amount) : '', next_date: next?.due ? fdate(next.due) : '',
     next_when: next ? (next.due ? `${next.due < today() ? 'was due on' : 'is due on'} ${fdate(next.due)}` : 'is due') : '',
-    next_line: next ? `Next payment: ${next.label} of ${money(next.amount)}${next.due ? ` due ${fdate(next.due)}` : ''}.` : '',
-    last_label: last?.label || '', last_amount: last ? money(last.amount) : '', last_date: last?.paidDate ? fdate(last.paidDate) : '',
+    next_line: next ? `Next payment: ${next.label} of ${dm(next.amount)}${next.due ? ` due ${fdate(next.due)}` : ''}.` : '',
+    last_label: last?.label || '', last_amount: last ? dm(last.amount) : '', last_date: last?.paidDate ? fdate(last.paidDate) : '',
     bank: bankLines.join('\n'),
     _paid: paid, _hasNext: !!next, _hasPaid: paidList.length > 0, _balance: r2(Number(d.total) - paid),
     _hasUpcoming: !!up, _ended: dates.length > 0 && dates.at(-1) < today(),
@@ -1196,6 +1228,9 @@ async function templates(v) {
 /* ---------- view / print ---------- */
 async function view(v, id) {
   const d = await q(sb.from('documents').select('*, customers(*)').eq('id', id).single());
+  const fx = curOf(d.customers) === 'USD' ? fxFor(S.usd_rates, d.issue_date) : null;
+  dm = fx ? (n) => usdFmt(Number(n) / fx.rate) : money;
+  const usdTotal = fx && d.items?.length ? usdFmt(d.items.reduce((t, i) => t + r2(Number(i.rate) / fx.rate), 0)) : null; // sum of the shown lines, so the page adds up
   const B = S, bankLines = (S.bank || '').split('\n').filter((l) => l.trim()), c = d.customers || {}, f = d.data || {};
   const bankHtml = bankLines.length ? bankLines.map((l) => `<p class="p">${esc(l)}</p>`).join('') : '<p class="p err noprint">Bank details are missing: add them in Settings.</p>';
   const termsHtml = (t) => {
@@ -1234,8 +1269,8 @@ async function view(v, id) {
     const cm = key === 'colombo';
     const head = (cm ? '<th>Date</th><th>Time</th><th>Activity</th><th>Guests</th><th>Vehicle</th><th class="r">Rate</th><th>Comments</th>' : '<th>Flight</th><th>Airline</th><th>Date</th><th>Time (CMB)</th>' + (key === 'departure' ? '<th>Leave hotel by</th>' : '') + '<th>Guests</th><th>Vehicle</th><th class="r">Rate</th>').replace('>Rate<', `>${RL}<`);
     const row = (i) => cm
-      ? `<td>${esc(fdate(i.date))}</td><td>${esc(i.time)}</td><td class="act">${esc(i.activity || [i.pickup, i.dropoff].filter(Boolean).join(' → '))}</td><td>${esc(i.guests)}</td><td>${esc(i.vehicle)}</td><td class="r">${money(i.rate)}</td><td class="act">${esc(i.comments)}</td>`
-      : `<td>${esc(i.flight)}</td><td>${esc(i.airline)}</td><td>${esc(fdate(i.date))}</td><td>${esc(i.time)}</td>${key === 'departure' ? `<td>${hasPickup(i) ? `${esc(fdate(i.pickup_date))}, ${esc(i.pickup_time)}` : '—'}</td>` : ''}<td>${esc(i.guests)}</td><td>${esc(i.vehicle)}</td><td class="r">${money(i.rate)}</td>`;
+      ? `<td>${esc(fdate(i.date))}</td><td>${esc(i.time)}</td><td class="act">${esc(i.activity || [i.pickup, i.dropoff].filter(Boolean).join(' → '))}</td><td>${esc(i.guests)}</td><td>${esc(i.vehicle)}</td><td class="r">${dm(i.rate)}</td><td class="act">${esc(i.comments)}</td>`
+      : `<td>${esc(i.flight)}</td><td>${esc(i.airline)}</td><td>${esc(fdate(i.date))}</td><td>${esc(i.time)}</td>${key === 'departure' ? `<td>${hasPickup(i) ? `${esc(fdate(i.pickup_date))}, ${esc(i.pickup_time)}` : '—'}</td>` : ''}<td>${esc(i.guests)}</td><td>${esc(i.vehicle)}</td><td class="r">${dm(i.rate)}</td>`;
     return `<h3 class="sec">${SECTIONS[key].toUpperCase()}</h3><table class="rates"><thead><tr>${head}</tr></thead><tbody>${rows.map((i) => `<tr>${row(i)}</tr>`).join('')}</tbody></table>`;
   };
   const nClauses = (String(f.terms || '').match(/^# /gm) || []).length, signNo = nClauses ? nClauses + 1 : 21; // follows the last clause in the terms
@@ -1249,24 +1284,24 @@ async function view(v, id) {
   const dates = d.items.map((i) => i.date).filter(Boolean).sort();
   const range = dates.length ? (dates[0] === dates.at(-1) ? fdate(dates[0]) : `${fdate(dates[0])} – ${fdate(dates.at(-1))}`) : '';
   const invoiceSummary = `<table class="rates"><thead><tr><th style="text-align:left">Description</th><th class="r">Amount</th></tr></thead><tbody><tr>
-    <td class="act" style="font-size:15px">Transportation services${f.quotation ? ` as per quotation ${esc(f.quotation)}` : ''}${range ? `<br><span style="font-size:13px">Service dates: ${esc(range)}</span>` : ''}</td><td class="r">${money(d.total)}</td></tr></tbody></table>`;
+    <td class="act" style="font-size:15px">Transportation services${f.quotation ? ` as per quotation ${esc(f.quotation)}` : ''}${range ? `<br><span style="font-size:13px">Service dates: ${esc(range)}</span>` : ''}</td><td class="r">${usdTotal || dm(d.total)}</td></tr></tbody></table>`;
   const invoiceTail = `<h3 class="sec">PAYMENT SCHEDULE</h3>
     <table class="rates pay"><thead><tr><th>#</th><th>Description</th><th>Share</th><th class="r">Amount</th><th>Due date</th><th>Status</th></tr></thead><tbody>${sch.map((s, i) =>
-      `<tr><td>${i + 1}</td><td class="act">${esc(s.label)}</td><td>${esc(r2(+s.percent))}%</td><td class="r">${money(s.amount)}</td><td>${esc(s.due ? fdate(s.due) : '—')}</td>
+      `<tr><td>${i + 1}</td><td class="act">${esc(s.label)}</td><td>${esc(r2(+s.percent))}%</td><td class="r">${dm(s.amount)}</td><td>${esc(s.due ? fdate(s.due) : '—')}</td>
        <td>${s.paid ? 'Paid' + (s.paidDate ? ' ' + esc(fdate(s.paidDate)) : '') : 'Unpaid'}<span class="noprint"> ${s.paid ? '' : `<input type="date" class="pd" data-pd="${i}" min="${DMIN}" max="${DMAX}" value="${today()}" aria-label="Date paid"> `}<button type="button" class="mini" data-pay="${i}">${s.paid ? 'Mark unpaid' : 'Mark paid'}</button></span></td></tr>`).join('')}</tbody></table>
-    <table class="sumtbl"><tr><td>Invoice total</td><td class="r">${money(d.total)}</td></tr><tr><td>Amount paid</td><td class="r">${money(paidSum)}</td></tr><tr><td><b>Balance due</b></td><td class="r"><b>${money(balance)}</b></td></tr></table>
+    <table class="sumtbl"><tr><td>Invoice total</td><td class="r">${usdTotal || dm(d.total)}</td></tr><tr><td>Amount paid</td><td class="r">${dm(paidSum)}</td></tr><tr><td><b>Balance due</b></td><td class="r"><b>${dm(balance)}</b></td></tr></table>
     ${bank || '<p class="p err noprint">Bank details are missing: add them in Settings.</p>'}
     <p class="p">Please quote invoice number <b>${esc(d.number)}</b> as the payment reference. All amounts are in Sri Lankan Rupees (LKR).</p>
     <p class="p">Services are subject to the agreed Terms &amp; Conditions.</p>`;
   const agrVeh = (d.items || []).length ? fleetSummary(d.items) : f.vehicle; // follows the quotation's lines
   const body = d.type === 'agreement' ? `
     ${parties}
-    ${[f.quotation, f.service, agrVeh, f.pickup, f.dropoff, f.start, f.end, f.deposit].some(Boolean) || (d.total && !d.items.length) ? `<table><tbody>${[['Quotation', f.quotation], ['Service', f.service], ['Vehicles', agrVeh], ['Pick-up', f.pickup], ['Drop-off', f.dropoff], ['Start', f.start ? fdate(String(f.start).slice(0, 10)) : ''], ['End', f.end ? fdate(String(f.end).slice(0, 10)) : ''], ['Agreed total', d.total && !d.items.length ? money(d.total) : ''], ['Deposit', f.deposit]]
+    ${[f.quotation, f.service, agrVeh, f.pickup, f.dropoff, f.start, f.end, f.deposit].some(Boolean) || (d.total && !d.items.length) ? `<table><tbody>${[['Quotation', f.quotation], ['Service', f.service], ['Vehicles', agrVeh], ['Pick-up', f.pickup], ['Drop-off', f.dropoff], ['Start', f.start ? fdate(String(f.start).slice(0, 10)) : ''], ['End', f.end ? fdate(String(f.end).slice(0, 10)) : ''], ['Agreed total', d.total && !d.items.length ? dm(d.total) : ''], ['Deposit', f.deposit]]
       .filter(([, x]) => x).map(([k, x]) => `<tr><th>${k}</th><td>${esc(x)}</td></tr>`).join('')}</tbody></table>` : ''}
-    ${d.items.length ? `${['arrival', 'departure', 'colombo'].map(section).join('')}<div class="totalbar"><span>AGREED TOTAL</span><span>${money(d.total, 0)}</span></div>` : ''}
+    ${d.items.length ? `${['arrival', 'departure', 'colombo'].map(section).join('')}<div class="totalbar"><span>AGREED TOTAL</span><span>${usdTotal || dm(d.total, 0)}</span></div>` : ''}
     ${termsHtml(f.terms)}${/\{\{bank\}\}/.test(f.terms || '') ? '' : bank}${signBlock}`
   : `${d.type === 'invoice' ? invoiceSummary : ['arrival', 'departure', 'colombo'].map(section).join('')}
-      <div class="totalbar"><span>${d.type === 'invoice' ? 'INVOICE TOTAL' : 'TOTAL'}</span><span>${money(d.total, 0)}</span></div>
+      <div class="totalbar"><span>${d.type === 'invoice' ? 'INVOICE TOTAL' : 'TOTAL'}</span><span>${usdTotal || dm(d.total, 0)}</span></div>
       ${d.type === 'invoice' ? invoiceTail : '<p class="b">Rates are per vehicle/run, subject to the attached Terms &amp; Conditions and availability.</p>'}`;
 
   v.innerHTML = `<div class="row noprint"><span>
@@ -1283,6 +1318,7 @@ async function view(v, id) {
           ? `${esc(d.number)}<br>Invoice date: ${esc(fdate(d.issue_date))}<br>Due date: ${esc(d.due_date ? fdate(d.due_date) : '—')}${f.quotation ? `<br>Ref: ${esc(f.quotation)}` : ''}<br><b class="stamp ${stamp === 'PAID' ? 'ok' : ''}">${stamp}</b>`
           : `${esc(d.number)}${d.type === 'agreement' ? '' : '<br>' + esc(KINDS[kindOf(d)])}<br>Date: ${esc(d.issue_date)}${d.due_date ? `<br>Valid until: ${esc(d.due_date)}` : ''}`}</div></div>
       ${d.type === 'agreement' ? '' : `<p><b>Bill to:</b><br>${esc(c.name)}<br>${esc(c.address)}<br>${esc(c.phone)} ${esc(c.email)}</p>`}
+      ${curOf(c) === 'USD' ? (fx ? `<p class="muted" style="font-size:12px">All amounts are in US dollars (US$), converted at Rs ${esc(fmtNum(String(fx.rate)))} per US$1, the Central Bank of Sri Lanka selling rate on 15 ${esc(new Date(fx.month + '-15T00:00:00').toLocaleDateString('en-GB', { month: 'long', year: 'numeric' }))}.</p>` : '<p class="err noprint">This customer is billed in USD but no USD rate is saved for this month: amounts are shown in Rs. Add the rate in Settings.</p>') : ''}
       ${body}${d.notes ? `<p><b>Notes:</b> ${esc(d.notes)}</p>` : ''}</div>`;
   $('#print').onclick = () => print();
   // file name like "Invoice - Curtin UNI.pdf" (agreements use the client organisation when it is filled in)
