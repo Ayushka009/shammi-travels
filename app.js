@@ -107,19 +107,23 @@ async function loadSettings() {
   settingsLoaded = true;
 }
 
-async function route() {
+// route(true) redraws the current page in place after an action (save, status change, delete): no "Loading…" flash, scroll position and open sections kept
+async function route(soft) {
   if (!sb) return;
+  soft = soft === true;
   const [page = 'dashboard', a, b, c, e5] = location.hash.replace(/^#\//, '').split('/');
   document.querySelectorAll('nav a').forEach((l) => l.classList.toggle('on', l.getAttribute('href') === `#/${page === 'customer' ? 'customers' : page === 'templates' ? 'settings' : page}${page === 'list' ? '/' + a : ''}`));
   const v = $('#view');
-  v.innerHTML = '<p class="muted">Loading…</p>';
+  const keep = soft ? { y: window.scrollY, open: [...v.querySelectorAll('details')].map((d) => d.open) } : null;
+  if (!soft) v.innerHTML = '<p class="muted">Loading…</p>';
   try {
     await loadSettings();
     const fn = { dashboard, customers, customer, list, edit, view, settings, profit, providers, templates, reports, schedule: scheduleView }[page] || dashboard;
     await fn(v, a, b, c, e5);
+    if (keep) { const ds = [...v.querySelectorAll('details')]; if (ds.length === keep.open.length) ds.forEach((d, i) => { d.open = keep.open[i]; }); window.scrollTo(0, keep.y); }
   } catch (e) { v.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
-window.addEventListener('hashchange', route);
+window.addEventListener('hashchange', () => route());
 
 /* ---------- dashboard ---------- */
 async function dashboard(v) {
@@ -402,7 +406,7 @@ async function providers(v) {
       } else if (t.id === 'pfcancel') resetPf();
       else if (d.pdel) {
         const p = provs.find((x) => x.id === d.pdel), n = rates.filter((r) => r.provider_id === p.id).length;
-        if (confirm(`Delete ${p.name}${n ? ` and its ${n} rate${n > 1 ? 's' : ''}` : ''}? This cannot be undone.`)) { await q(sb.from('service_providers').delete().eq('id', p.id)); route(); }
+        if (confirm(`Delete ${p.name}${n ? ` and its ${n} rate${n > 1 ? 's' : ''}` : ''}? This cannot be undone.`)) { await q(sb.from('service_providers').delete().eq('id', p.id)); route(true); }
       } else if (d.redit) {
         const r = rates.find((x) => x.id === d.redit), det = v.querySelector(`[data-rdetails="${r.provider_id}"]`), f = det.querySelector('form');
         det.open = true; det.querySelector('summary').textContent = `Edit rate: ${r.vehicle}`;
@@ -413,7 +417,7 @@ async function providers(v) {
         const det = t.closest('details'); det.querySelector('form').reset(); det.querySelector('[name=id]').value = ''; det.querySelector('summary').textContent = 'Add a rate'; det.querySelector('.rerr').textContent = ''; det.open = false;
       } else if (d.rdel) {
         const r = rates.find((x) => x.id === d.rdel);
-        if (confirm(`Delete the ${r.vehicle} rate?`)) { await q(sb.from('provider_rates').delete().eq('id', r.id)); route(); }
+        if (confirm(`Delete the ${r.vehicle} rate?`)) { await q(sb.from('provider_rates').delete().eq('id', r.id)); route(true); }
       }
     } catch (err) { alert(err.message); }
   };
@@ -430,7 +434,7 @@ async function providers(v) {
         if (!f.email.checkValidity()) return (err.textContent = 'Enter a valid email address.');
         if (provs.some((p) => p.id !== f.id.value && p.name.toLowerCase() === row.name.toLowerCase())) return (err.textContent = `A provider named “${row.name}” already exists.`);
         await q(f.id.value ? sb.from('service_providers').update(row).eq('id', f.id.value) : sb.from('service_providers').insert(row));
-        route();
+        route(true);
       } else if (f.classList.contains('rf')) {                         // ---- rate
         const err = f.querySelector('.rerr'); err.textContent = '';
         const bad = (m, el) => { err.textContent = m; el?.focus(); };
@@ -444,7 +448,7 @@ async function providers(v) {
         if (rates.some((r) => r.provider_id === row.provider_id && r.id !== f.id.value && r.vehicle.toLowerCase() === row.vehicle.toLowerCase() && (r.hours ?? null) === row.hours && (r.included_km ?? null) === row.included_km))
           return bad('This provider already has a rate for that vehicle, hours and km. Edit it instead.', f.vehicle);
         await q(f.id.value ? sb.from('provider_rates').update(row).eq('id', f.id.value) : sb.from('provider_rates').insert(row));
-        route();
+        route(true);
       }
     } catch (err) { alert(err.message); }
   };
@@ -587,7 +591,7 @@ async function scheduleView(v, mode) {
       const { assign: old, ...rest } = it, a = { ...(old || {}), status };
       fresh.items[idx] = status === 'unassigned' && !unitsOf(a).length && !a.note ? rest : { ...rest, assign: a };
       await q(sb.from('documents').update({ items: fresh.items }).eq('id', el.dataset.doc));
-      route();
+      route(true);
     } catch (err) { msg.textContent = err.message; el.disabled = false; el.value = el.querySelector('option[selected]')?.value || el.value; }
   };
   v.onclick = (e) => {
@@ -615,7 +619,7 @@ async function scheduleView(v, mode) {
       msg.textContent = 'Asking the flight service…';
       await new Promise((res) => setTimeout(res, 8000));
       await q(sb.rpc('flight_refresh', { queue: false }));
-      route();
+      route(true);
     } catch (err) { msg.textContent = `Could not check: ${err.message}`; b.disabled = false; }
   };
   v.onsubmit = async (e) => {
@@ -641,7 +645,7 @@ async function scheduleView(v, mode) {
       const { assign: _old, ...rest } = fresh.items[idx];
       fresh.items[idx] = empty ? rest : { ...rest, assign: a };
       await q(sb.from('documents').update({ items: fresh.items }).eq('id', f.dataset.doc));
-      route();
+      route(true);
     } catch (e2) { err.textContent = e2.message; }
   };
 }
@@ -764,11 +768,11 @@ async function customers(v) {
     const row = Object.fromEntries([...new FormData(e.target)].map(([k, x]) => [k, String(x).trim().replace(/\s+/g, ' ')]));
     if (!row.name) { $('#cerr').textContent = 'Enter the customer name.'; return; }
     if (rows.some((c) => c.name.toLowerCase() === row.name.toLowerCase())) { $('#cerr').textContent = `A customer named “${row.name}” already exists.`; return; }
-    try { await q(sb.from('customers').insert(row)); route(); } catch (err) { alert(err.message); }
+    try { await q(sb.from('customers').insert(row)); route(true); } catch (err) { alert(err.message); }
   };
   v.querySelectorAll('[data-del]').forEach((b) => b.onclick = async () => {
     if (!confirm('Delete this customer?')) return;
-    try { await q(sb.from('customers').delete().eq('id', b.dataset.del)); route(); } catch (err) { alert('Cannot delete: this customer has documents.'); }
+    try { await q(sb.from('customers').delete().eq('id', b.dataset.del)); route(true); } catch (err) { alert('Cannot delete: this customer has documents.'); }
   });
 }
 
@@ -1325,7 +1329,7 @@ async function view(v, id) {
       const all = pays.every((p) => p.paid);
       const status = d.status === 'cancelled' ? d.status : all ? 'paid' : d.status === 'paid' ? 'sent' : d.status;
       await q(sb.from('documents').update({ data: { ...(d.data || {}), payments: pays }, status }).eq('id', id));
-      route();
+      route(true);
     } catch (err) { alert(err.message); }
   });
   $('#st').onchange = async (e) => { try { await q(sb.from('documents').update({ status: e.target.value }).eq('id', id)); } catch (err) { alert(err.message); } };
