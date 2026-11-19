@@ -7,7 +7,7 @@ header{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;padding:10px 
 nav{display:flex;flex-wrap:wrap;gap:4px;flex:1}
 nav a{padding:8px 12px;border-radius:8px;color:var(--ink);text-decoration:none}
 nav a.on{background:var(--brand);color:#fff}
-main{max-width:1000px;margin:0 auto;padding:16px}
+main{max-width:none;margin:0;padding:16px clamp(16px,2.5vw,40px)} /* uses the whole screen width */
 h1,h2{margin:.2em 0 .6em}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
 #login{min-height:100vh;display:grid;place-items:center;padding:16px}
@@ -142,3 +142,6 @@ nav a{display:inline-flex;align-items:center;min-height:40px}
 fieldset.unit{border:1px solid var(--line);border-radius:8px;margin:8px 0;padding:8px 12px}
 fieldset.unit legend{font-weight:600;padding:0 6px}
 select.badge.qs{display:inline-block;width:auto;margin:0;padding:2px 8px;font-size:12px;cursor:pointer;background:var(--card)}
+
+/* a document page (invoice, quotation, agreement) stays at a readable paper width in the middle of the wider page */
+.sheet{max-width:980px;margin-left:auto;margin-right:auto}
