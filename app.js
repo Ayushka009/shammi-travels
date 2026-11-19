@@ -8,7 +8,7 @@ const money = (n, min = 2) => `${n < 0 ? '-' : ''}${CONFIG.CURRENCY}${Math.abs(N
 const curOf = (c) => (c?.currency === 'USD' ? 'USD' : 'LKR');
 const usdFmt = (n, min = 2) => `${n < 0 ? '-' : ''}US$${Math.abs(Number(n || 0)).toLocaleString('en-US', { minimumFractionDigits: min, maximumFractionDigits: 2 })}`;
 const rv = (x) => +(x?.r ?? x); // a month's rate is a number (typed in) or {r, auto: true} (filled in from the public rate API)
-const fxFor = (rates, iso) => { const m = String(iso || '').slice(0, 7); const k = Object.keys(rates || {}).filter((x) => x <= m && rv(rates[x]) > 0).sort().at(-1); return k ? { month: k, rate: rv(rates[k]), auto: !!rates[k].auto } : null; };
+const fxFor = (rates, iso) => { const m = String(iso || '').slice(0, 7); const k = Object.keys(rates || {}).filter((x) => x <= m && rv(rates[x]) > 0).sort().at(-1); return k ? { month: k, rate: Math.ceil(rv(rates[k])), auto: !!rates[k].auto } : null; };
 // Months from the last six whose 15th has passed and that have no rate yet are filled in once per visit from a free public API (market USD→LKR rate on the 15th, not CBSL's own figure); typed-in rates are never overwritten.
 let fxTried = false;
 async function autoRates() {
@@ -20,7 +20,7 @@ async function autoRates() {
     if (d > now || rv(rates[m]) > 0) continue;
     try {
       const j = await (await fetch(`https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@${m}-15/v1/currencies/usd.json`, { signal: AbortSignal.timeout(8000) })).json();
-      const r = Math.round(j.usd.lkr * 100) / 100;
+      const r = Math.ceil(j.usd.lkr); // whole rupees, rounded up
       if (r > 1 && r < 10000) { rates[m] = { r, auto: true }; changed = true; }
     } catch { /* offline or not published yet: try again next visit */ }
   }
@@ -249,18 +249,20 @@ async function settings(v) {
     <button class="primary">Save settings</button> <span id="ok" class="muted" role="status"></span></form>
     <div class="card" id="fxc"><h3>US dollar rates</h3>
       <p class="muted">Everything is kept in Rs. Customers billed in US$ see documents converted at the Central Bank of Sri Lanka USD selling rate on the 15th of the document's month. Rates marked <i>auto</i> are filled in each month from a free public exchange-rate service (the market rate on the 15th, which can differ a little from CBSL's own selling rate). Typing a rate for a month replaces it, and typed rates are never overwritten. A month with no rate uses the latest earlier one.</p>
-      <div class="tablewrap"><table><thead><tr><th>Month</th><th class="num">Rs per US$1</th><th></th></tr></thead><tbody>${Object.entries(S.usd_rates || {}).sort().reverse().map(([m, r]) => `<tr><td>${esc(m)}</td><td class="num">${esc(fmtNum(String(rv(r))))}${r?.auto ? ' <span class="muted">auto</span>' : ''}</td><td><button type="button" class="mini danger" data-fxdel="${esc(m)}">Delete</button></td></tr>`).join('') || '<tr><td colspan="3" class="muted">No rates yet.</td></tr>'}</tbody></table></div>
-      <form id="fxf" class="grid"><label>Month <input type="month" name="m" required></label><label>Selling rate on the 15th (Rs) <input name="r" inputmode="decimal" autocomplete="off" maxlength="9" required></label>
+      <div class="tablewrap"><table><thead><tr><th>Month</th><th class="num">Rs per US$1</th><th></th></tr></thead><tbody>${Object.entries(S.usd_rates || {}).sort().reverse().map(([m, r]) => `<tr><td>${esc(m)}</td><td class="num">${esc(fmtNum(String(Math.ceil(rv(r)))))}${r?.auto ? ' <span class="muted">auto</span>' : ''}</td><td><button type="button" class="mini" data-fxedit="${esc(m)}" data-r="${esc(rv(r))}">Change</button> <button type="button" class="mini danger" data-fxdel="${esc(m)}">Delete</button></td></tr>`).join('') || '<tr><td colspan="3" class="muted">No rates yet.</td></tr>'}</tbody></table></div>
+      <form id="fxf" class="grid"><label>Month <input type="month" name="m" required></label><label>Rate on the 15th (Rs per US$1, whole rupees) <input name="r" inputmode="numeric" autocomplete="off" maxlength="6" required></label>
         <div><button class="primary">Save rate</button> <span id="fxok" class="muted" role="status"></span></div></form></div>`;
   const saveRates = async (rates) => { await q(sb.from('settings').upsert({ id: 1, usd_rates: rates })); S = { ...S, usd_rates: rates }; route(true); };
-  $('#fxf').oninput = (e) => { if (e.target.name === 'r') liveMoney(e.target); };
+  $('#fxf').oninput = (e) => { if (e.target.name === 'r') e.target.value = e.target.value.replace(/\D/g, ''); };
   $('#fxf').onsubmit = async (e) => {
     e.preventDefault();
-    const m = e.target.m.value, r = parseNum(e.target.r.value);
+    const m = e.target.m.value, r = Math.ceil(parseNum(e.target.r.value));
     if (!(r > 1 && r < 10000)) return alert('Enter the rate in rupees per US$1, for example 300.50.');
     try { await saveRates({ ...(S.usd_rates || {}), [m]: r }); } catch (err) { alert(err.message); }
   };
   $('#fxc').onclick = async (e) => {
+    const ed = e.target.closest('[data-fxedit]');
+    if (ed) { const f = $('#fxf'); f.m.value = ed.dataset.fxedit; f.r.value = Math.ceil(+ed.dataset.r); f.r.focus(); return; }
     const b = e.target.closest('[data-fxdel]'); if (!b || !confirm(`Delete the rate for ${b.dataset.fxdel}?`)) return;
     const rates = { ...(S.usd_rates || {}) }; delete rates[b.dataset.fxdel];
     try { await saveRates(rates); } catch (err) { alert(err.message); }
