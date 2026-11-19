@@ -53,7 +53,7 @@ async function syncLinked(qt) {
   const strip = ({ cost: _c, actual_cost: _a, assign: _s, ...i }) => i;
   const docs = await q(sb.from('documents').select('id,type,status,data').in('type', ['agreement', 'invoice']).or(`data->>quotation_id.eq.${qt.id},data->>quotation.eq.${qt.number}`));
   for (const x of docs.filter((y) => ['agreement', 'invoice'].includes(y.type) && !['paid', 'cancelled'].includes(y.status) && (!y.data?.quotation_id || y.data.quotation_id === qt.id)))
-    await q(sb.from('documents').update({ customer_id: qt.customer_id, items: qt.items.map(strip), total: qt.total, data: { ...x.data, quotation: qt.number, quotation_id: qt.id, kind: qt.kind, ...(x.type === 'agreement' ? { vehicle: fleetSummary(qt.items) } : {}) } }).eq('id', x.id));
+    await q(sb.from('documents').update({ customer_id: qt.customer_id, items: qt.items.map(strip), total: qt.total, data: { ...x.data, quotation: qt.number, quotation_id: qt.id, kind: qt.kind, fx: qt.fx, ...(x.type === 'agreement' ? { vehicle: fleetSummary(qt.items) } : {}) } }).eq('id', x.id));
 }
 const vehicleCount = (i) => fleetOf(i).reduce((n, x) => n + (x.vehicle ? Math.max(1, +x.qty || 1) : 0), 0) || 1;
 const today = () => new Date().toLocaleDateString('en-CA');
@@ -846,7 +846,7 @@ async function edit(v, type, id, cid, qid) {
   if (id === '-') id = undefined; // '-' = new document (lets the 4th segment carry a customer id)
   const UUID = /^[0-9a-f-]{36}$/;
   const [custs, existing] = await Promise.all([
-    q(sb.from('customers').select('id,name').order('name')),
+    q(sb.from('customers').select('id,name,currency').order('name')),
     id ? q(sb.from('documents').select('*').eq('id', id).single()) : null,
   ]);
   // agreements are built from accepted quotations (plus the one already linked / passed in the URL)
@@ -896,14 +896,21 @@ async function edit(v, type, id, cid, qid) {
   const fit = () => items.forEach((i) => { if (!KIND_SECTIONS[kind].includes(i.section)) i.section = KIND_SECTIONS[kind][0]; });
   fit();
   items.forEach((i) => { i.fleet = fleetOf(i).map((x) => ({ vehicle: x.vehicle, qty: x.qty })); });
+  // amounts are typed in the customer's billing currency (Rs or US$) and stored in Rs (rate), with the typed US$ kept in rate_usd and the rate used in data.fx
+  const custEl = () => document.querySelector('[name=customer_id]'), issueEl = () => document.querySelector('[name=issue_date]');
+  const curNow = () => curOf(custs.find((c) => c.id === custEl()?.value));
+  const fxNow = () => (d.data?.fx?.rate > 0 && String(issueEl()?.value).slice(0, 7) === String(d.issue_date).slice(0, 7) ? d.data.fx : fxFor(S.usd_rates, issueEl()?.value));
+  let ecur = curNow();
+  const emoney = (n, min) => (ecur === 'USD' ? usdFmt(n, min) : money(n, min));
+  if (ecur === 'USD') { const x = fxNow(); items.forEach((i) => { i.rate = i.rate_usd > 0 ? +i.rate_usd : x && i.rate ? r2(i.rate / x.rate) : i.rate; }); }
   // ---- invoice payment plan: full payment, or split into percentage instalments
   let pay = (f.payments && f.payments.length) ? f.payments.map((x) => ({ ...x })) : [{ label: 'Full payment', percent: 100, due: d.due_date || '', paid: false, paidDate: '' }];
   let mode = pay.length > 1 ? 'split' : 'full';
-  const dueEl = () => document.querySelector('[name=due_date]'), issueEl = () => document.querySelector('[name=issue_date]');
+  const dueEl = () => document.querySelector('[name=due_date]');
   const lastDue = () => pay.map((p) => p.due).filter(Boolean).sort().at(-1) || '';
   function payAmounts() {
     if (type !== 'invoice') return;
-    schedule({ total: calc(items).total, status: 'draft', data: { payments: pay } }).forEach((r, i) => { const el = document.querySelector(`[data-amt="${i}"]`); if (el) el.textContent = money(r.amount); });
+    schedule({ total: calc(items).total, status: 'draft', data: { payments: pay } }).forEach((r, i) => { const el = document.querySelector(`[data-amt="${i}"]`); if (el) el.textContent = emoney(r.amount); });
     const sum = pay.reduce((s, p) => s + (+p.percent || 0), 0), ok = Math.abs(sum - 100) < 0.005, ps = $('#psum');
     if (ps) { ps.textContent = `Total ${r2(sum)}% ${ok ? '✓' : '— must add up to 100%'}`; ps.className = 'num' + (ok ? '' : ' neg'); }
   }
@@ -920,7 +927,7 @@ async function edit(v, type, id, cid, qid) {
     if (mode === 'split') { de.value = lastDue(); de.disabled = true; } else de.disabled = false;
     payAmounts();
   }
-  const totals = () => { if (!agr) $('#totals').innerHTML = `<b>Total ${money(calc(items).total)}</b>`; payAmounts(); };
+  const totals = () => { if (!agr) $('#totals').innerHTML = `<b>Total ${emoney(calc(items).total)}</b>`; payAmounts(); };
   const paint = () => {
     const inp = (i, k, label, t = 'text', extra = '') => k === 'rate'
       ? `<label>${label}<input data-i="${i}" data-k="rate" inputmode="decimal" autocomplete="off" placeholder="0.00" maxlength="15" value="${items[i].rate ? esc(fmtNum(items[i].rate)) : ''}"></label>`
@@ -928,15 +935,22 @@ async function edit(v, type, id, cid, qid) {
     const veh = (i, it) => `<div class="wide fleet"><span class="muted">Vehicles</span>${it.fleet.map((x, j) => `<div class="frow"><label>Vehicle${vehicleSelect(`data-i="${i}" data-j="${j}" data-fk="vehicle"`, x.vehicle)}</label><label>Qty<input data-i="${i}" data-j="${j}" data-fk="qty" type="number" min="1" max="50" step="1" value="${esc(x.qty)}"></label>${it.fleet.length > 1 ? `<button type="button" class="danger" data-frm="${i}.${j}" aria-label="Remove vehicle">✕</button>` : '<span></span>'}</div>`).join('')}<button type="button" class="mini" data-fadd="${i}">+ Add another vehicle type</button></div>`;
     const typeSel = (i, it) => KIND_SECTIONS[kind].length > 1 ? `<label>Type<select data-i="${i}" data-k="section">${KIND_SECTIONS[kind].map((k) => `<option value="${k}" ${k === it.section ? 'selected' : ''}>${SECTIONS[k]}</option>`).join('')}</select></label>` : '';
     $('#items').innerHTML = items.map((it, i) => `<div class="item">${typeSel(i, it)}${it.section === 'colombo'
-      ? `${inp(i, 'date', 'Date', 'date')}${inp(i, 'time', 'Time (e.g. 9:00am)')}${inp(i, 'guests', 'Guests', 'number', 'min="0"')}${inp(i, 'rate', 'Rate', 'number', 'min="0" step="0.01"')}${veh(i, it)}
+      ? `${inp(i, 'date', 'Date', 'date')}${inp(i, 'time', 'Time (e.g. 9:00am)')}${inp(i, 'guests', 'Guests', 'number', 'min="0"')}${inp(i, 'rate', `Rate (${ecur === 'USD' ? 'US$' : 'Rs'})`, 'number', 'min="0" step="0.01"')}${veh(i, it)}
       <label class="wide">Activity (one per line)<textarea data-i="${i}" data-k="activity" rows="3" maxlength="600">${esc(it.activity || [it.pickup, it.dropoff].filter(Boolean).join(' → '))}</textarea></label>
       <label class="wide">Comments / extra charges<input data-i="${i}" data-k="comments" maxlength="300" value="${esc(it.comments)}"></label>`
-      : `${inp(i, 'flight', 'Flight')}${inp(i, 'airline', 'Airline')}${inp(i, 'date', 'Date', 'date')}${inp(i, 'time', it.section === 'departure' ? 'Flight time' : 'Time', 'time')}${it.section === 'departure' ? `${inp(i, 'pickup_date', 'Leave hotel: date', 'date')}${inp(i, 'pickup_time', 'Leave hotel by', 'time')}` : ''}${inp(i, 'guests', 'Guests', 'number', 'min="0"')}${inp(i, 'rate', 'Rate', 'number', 'min="0" step="0.01"')}${veh(i, it)}`}
+      : `${inp(i, 'flight', 'Flight')}${inp(i, 'airline', 'Airline')}${inp(i, 'date', 'Date', 'date')}${inp(i, 'time', it.section === 'departure' ? 'Flight time' : 'Time', 'time')}${it.section === 'departure' ? `${inp(i, 'pickup_date', 'Leave hotel: date', 'date')}${inp(i, 'pickup_time', 'Leave hotel by', 'time')}` : ''}${inp(i, 'guests', 'Guests', 'number', 'min="0"')}${inp(i, 'rate', `Rate (${ecur === 'USD' ? 'US$' : 'Rs'})`, 'number', 'min="0" step="0.01"')}${veh(i, it)}`}
       <button type="button" class="danger" data-rm="${i}" aria-label="Remove line">✕</button></div>`).join('');
     totals();
   };
   if (!agr) {
     paint();
+    custEl().addEventListener('change', () => {
+      const n = curNow(); if (n === ecur) return;
+      const x = fxNow();
+      if (!x) alert('This month has no USD rate yet, so the typed amounts are kept as they are. Add the rate in Settings, then check the amounts.');
+      else items.forEach((i) => { i.rate = n === 'USD' ? r2((+i.rate || 0) / x.rate) : r2((+i.rate || 0) * x.rate); });
+      ecur = n; paint();
+    });
     $('#items').oninput = (e) => { const t = e.target; if (!t.dataset.i) return; if (t.dataset.fk) { items[t.dataset.i].fleet[t.dataset.j][t.dataset.fk] = t.value; return; } if (t.dataset.k === 'rate') { liveMoney(t); items[t.dataset.i].rate = parseNum(t.value); } else items[t.dataset.i][t.dataset.k] = t.value; if (t.dataset.k === 'section') paint(); else totals(); };
     $('#items').onclick = (e) => { const t = e.target; if (t.dataset.fadd !== undefined) { items[t.dataset.fadd].fleet.push({ vehicle: '', qty: 1 }); return paint(); } if (t.dataset.frm) { const [i, j] = t.dataset.frm.split('.'); items[i].fleet.splice(+j, 1); return paint(); } if (e.target.dataset.rm !== undefined) { items.splice(e.target.dataset.rm, 1); if (!items.length) items.push(newItem()); paint(); } };
     $('#add').onclick = () => { items.push(newItem(items.at(-1)?.section || KIND_SECTIONS[kind][0])); paint(); };
@@ -991,6 +1005,9 @@ async function edit(v, type, id, cid, qid) {
     const item = (n, k) => document.querySelector(`[data-i="${n}"][data-k="${k}"]`);
     if (fd.due_date && fd.due_date < fd.issue_date) return bad(`The ${type === 'invoice' ? 'due' : 'valid-until'} date cannot be before the document date.`, document.querySelector('[name=due_date]'));
     if (agr && fd.start && fd.end && fd.end < fd.start) return bad('The end date cannot be before the start date.', document.querySelector('[name=end]'));
+    const fxs = ecur === 'USD' ? fxNow() : null;
+    if (!agr && ecur === 'USD' && !fxs) return bad('No US dollar rate is saved for this month. Add it in Settings, under US dollar rates.');
+    const toLkr = (x) => (fxs ? r2(x * fxs.rate) : x);
     const row = { type, customer_id: fd.customer_id, issue_date: fd.issue_date, due_date: fd.due_date || null, status: fd.status, notes: fd.notes };
     if (agr) {
       const qt = quotes.find((x) => x.id === fd.quotation_id && x.customer_id === fd.customer_id);
@@ -999,7 +1016,7 @@ async function edit(v, type, id, cid, qid) {
       if (row.total > MAXAMT) return bad('The agreed total is too large.', $('#rate'));
       row.data = Object.fromEntries(['company', 'service', 'vehicle', 'pickup', 'dropoff', 'start', 'end', 'deposit', 'terms'].map((k) => [k, fd[k] || '']));
       if (qt) row.data.vehicle = fleetSummary(qt.items);
-      if (qt) Object.assign(row.data, { kind: kindOf(qt), quotation: qt.number, quotation_id: qt.id });
+      if (qt) Object.assign(row.data, { kind: kindOf(qt), quotation: qt.number, quotation_id: qt.id, fx: qt.data?.fx });
     } else {
       const live = items.map((it, n) => [it, n]).filter(([i]) => (i.flight || i.activity || i.pickup || '').trim() || +i.rate);
       if (!live.length) return bad('Add at least one line.', $('#add'));
@@ -1015,9 +1032,9 @@ async function edit(v, type, id, cid, qid) {
         if (!(Number.isInteger(+i.guests) && +i.guests >= 1 && +i.guests <= 500)) return bad(`${L}: guests must be a whole number from 1 to 500.`, item(n, 'guests'));
         if (!(+i.rate > 0) || +i.rate > MAXAMT) return bad(`${L}: enter a rate greater than 0.`, item(n, 'rate'));
       }
-      row.items = live.map(([i]) => { const fleet = i.fleet.map((x) => ({ vehicle: x.vehicle, qty: +x.qty })); return { ...i, ...(i.section === 'departure' ? {} : { pickup_date: '', pickup_time: '' }), fleet, vehicle: fleetText(fleet), guests: +i.guests || 0, rate: +i.rate || 0 }; });
+      row.items = live.map(([i]) => { const fleet = i.fleet.map((x) => ({ vehicle: x.vehicle, qty: +x.qty })); return { ...i, ...(i.section === 'departure' ? {} : { pickup_date: '', pickup_time: '' }), fleet, vehicle: fleetText(fleet), guests: +i.guests || 0, rate: toLkr(+i.rate || 0), rate_usd: fxs ? +i.rate || 0 : undefined }; });
       row.tax_rate = 0;
-      row.data = { ...(d.data || {}), kind };
+      row.data = { ...(d.data || {}), kind, fx: fxs ? { rate: fxs.rate, month: fxs.month, auto: !!fxs.auto } : undefined };
       row.total = calc(row.items).total;
       if (type === 'invoice') {
         const pel = (i, k) => document.querySelector(`[data-p="${i}"][data-k="${k}"]`);
@@ -1047,7 +1064,7 @@ async function edit(v, type, id, cid, qid) {
     }
     try {
       const rid = id ? (await q(sb.from('documents').update(row).eq('id', id)), id) : await nextInsert(row);
-      if (id && type === 'quotation') await syncLinked({ id, number: d.number, customer_id: row.customer_id, items: row.items, total: row.total, kind }).catch((e2) => alert(`Saved, but the linked agreement or invoice could not be refreshed: ${e2.message}`));
+      if (id && type === 'quotation') await syncLinked({ id, number: d.number, customer_id: row.customer_id, items: row.items, total: row.total, kind, fx: row.data.fx }).catch((e2) => alert(`Saved, but the linked agreement or invoice could not be refreshed: ${e2.message}`));
       // stay on the form: a new document becomes an edit of the saved one (URL swapped without reloading), later saves update it
       if (!id) { id = rid; d.number = (await q(sb.from('documents').select('number').eq('id', rid).single())).number; history.replaceState(null, '', `#/edit/${type}/${rid}`); document.querySelector('h2').textContent = `Edit ${LABEL[type].toLowerCase()} ${d.number}`; $('#fview').href = `#/view/${rid}`; $('#fview').hidden = false; }
       e.target.status.value = row.status; // an invoice with every instalment paid is marked paid on save
@@ -1250,9 +1267,11 @@ async function templates(v) {
 /* ---------- view / print ---------- */
 async function view(v, id) {
   const d = await q(sb.from('documents').select('*, customers(*)').eq('id', id).single());
-  const fx = curOf(d.customers) === 'USD' ? fxFor(S.usd_rates, d.issue_date) : null;
+  const fx = curOf(d.customers) !== 'USD' ? null : d.data?.fx?.rate > 0 ? { rate: +d.data.fx.rate, month: d.data.fx.month, auto: !!d.data.fx.auto } : fxFor(S.usd_rates, d.issue_date); // the rate used when the document was saved, else the month's current rate
   dm = fx ? (n) => usdFmt(Number(n) / fx.rate) : money;
-  const usdTotal = fx && d.items?.length ? usdFmt(d.items.reduce((t, i) => t + r2(Number(i.rate) / fx.rate), 0)) : null; // sum of the shown lines, so the page adds up
+  const usd = (i) => (i.rate_usd > 0 ? +i.rate_usd : r2(Number(i.rate) / fx.rate)); // US$ as typed, else converted
+  const lm = (i) => (fx ? usdFmt(usd(i)) : money(i.rate));
+  const usdTotal = fx && d.items?.length ? usdFmt(d.items.reduce((t, i) => t + usd(i), 0)) : null; // sum of the shown lines, so the page adds up
   const B = S, bankLines = (S.bank || '').split('\n').filter((l) => l.trim()), c = d.customers || {}, f = d.data || {};
   const bankHtml = bankLines.length ? bankLines.map((l) => `<p class="p">${esc(l)}</p>`).join('') : '<p class="p err noprint">Bank details are missing: add them in Settings.</p>';
   const termsHtml = (t) => {
@@ -1291,8 +1310,8 @@ async function view(v, id) {
     const cm = key === 'colombo';
     const head = (cm ? '<th>Date</th><th>Time</th><th>Activity</th><th>Guests</th><th>Vehicle</th><th class="r">Rate</th><th>Comments</th>' : '<th>Flight</th><th>Airline</th><th>Date</th><th>Time (CMB)</th>' + (key === 'departure' ? '<th>Leave hotel by</th>' : '') + '<th>Guests</th><th>Vehicle</th><th class="r">Rate</th>').replace('>Rate<', `>${RL}<`);
     const row = (i) => cm
-      ? `<td>${esc(fdate(i.date))}</td><td>${esc(i.time)}</td><td class="act">${esc(i.activity || [i.pickup, i.dropoff].filter(Boolean).join(' → '))}</td><td>${esc(i.guests)}</td><td>${esc(i.vehicle)}</td><td class="r">${dm(i.rate)}</td><td class="act">${esc(i.comments)}</td>`
-      : `<td>${esc(i.flight)}</td><td>${esc(i.airline)}</td><td>${esc(fdate(i.date))}</td><td>${esc(i.time)}</td>${key === 'departure' ? `<td>${hasPickup(i) ? `${esc(fdate(i.pickup_date))}, ${esc(i.pickup_time)}` : '—'}</td>` : ''}<td>${esc(i.guests)}</td><td>${esc(i.vehicle)}</td><td class="r">${dm(i.rate)}</td>`;
+      ? `<td>${esc(fdate(i.date))}</td><td>${esc(i.time)}</td><td class="act">${esc(i.activity || [i.pickup, i.dropoff].filter(Boolean).join(' → '))}</td><td>${esc(i.guests)}</td><td>${esc(i.vehicle)}</td><td class="r">${lm(i)}</td><td class="act">${esc(i.comments)}</td>`
+      : `<td>${esc(i.flight)}</td><td>${esc(i.airline)}</td><td>${esc(fdate(i.date))}</td><td>${esc(i.time)}</td>${key === 'departure' ? `<td>${hasPickup(i) ? `${esc(fdate(i.pickup_date))}, ${esc(i.pickup_time)}` : '—'}</td>` : ''}<td>${esc(i.guests)}</td><td>${esc(i.vehicle)}</td><td class="r">${lm(i)}</td>`;
     return `<h3 class="sec">${SECTIONS[key].toUpperCase()}</h3><table class="rates"><thead><tr>${head}</tr></thead><tbody>${rows.map((i) => `<tr>${row(i)}</tr>`).join('')}</tbody></table>`;
   };
   const nClauses = (String(f.terms || '').match(/^# /gm) || []).length, signNo = nClauses ? nClauses + 1 : 21; // follows the last clause in the terms
