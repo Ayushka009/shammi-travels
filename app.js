@@ -115,7 +115,7 @@ async function route() {
   v.innerHTML = '<p class="muted">Loading…</p>';
   try {
     await loadSettings();
-    const fn = { dashboard, customers, customer, list, edit, view, settings, profit, providers, templates, schedule: scheduleView }[page] || dashboard;
+    const fn = { dashboard, customers, customer, list, edit, view, settings, profit, providers, templates, reports, schedule: scheduleView }[page] || dashboard;
     await fn(v, a, b, c, e5);
   } catch (e) { v.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
@@ -644,6 +644,90 @@ async function scheduleView(v, mode) {
       route();
     } catch (e2) { err.textContent = e2.message; }
   };
+}
+
+
+/* ---------- reports ---------- */
+// "We owe providers": each accepted quotation line's cost (actual if entered, else estimated) is shared between the vehicles
+// assigned to it and charged to each vehicle's provider; payments we made are recorded in provider_payments.
+const provKey = (n) => String(n || '').trim().replace(/\s+/g, ' ').toLowerCase();
+const isOwn = (k) => ['own', 'own vehicle', 'own vehicles', 'shammi travels', 'shammi'].includes(k);
+async function reports(v) {
+  let docs, pays, scope = 'all'; const opened = new Set();
+  const load = async () => {
+    [docs, pays] = await Promise.all([
+      q(sb.from('documents').select('id,type,number,status,total,issue_date,due_date,customer_id,data,items,customers(name)').in('type', ['invoice', 'quotation'])),
+      q(sb.from('provider_payments').select('*').order('paid_on', { ascending: false }).order('created_at', { ascending: false })),
+    ]);
+  };
+  const sum = (a, f = (x) => x) => r2(a.reduce((s, x) => s + f(x), 0));
+  const draw = () => {
+    const t = today();
+    // ---- customers owe us (unpaid invoice instalments)
+    const inv = docs.filter((d) => d.type === 'invoice' && d.status !== 'cancelled');
+    const rec = inv.flatMap((d) => schedule(d).map((x) => ({ ...x, d })));
+    const unpaid = rec.filter((x) => !x.paid && x.amount > 0);
+    const byCust = new Map();
+    for (const x of unpaid) { if (!byCust.has(x.d.customer_id)) byCust.set(x.d.customer_id, { id: x.d.customer_id, name: x.d.customers?.name || '—', rows: [] }); byCust.get(x.d.customer_id).rows.push(x); }
+    const custs = [...byCust.values()].map((c) => ({ ...c, owed: sum(c.rows, (x) => x.amount), over: sum(c.rows.filter((x) => x.due && x.due < t), (x) => x.amount) })).sort((a, b) => b.owed - a.owed);
+    const receivable = sum(custs, (c) => c.owed), invoiced = sum(inv, (d) => Number(d.total)), collected = sum(rec.filter((x) => x.paid), (x) => x.amount);
+    // ---- we owe providers
+    const groups = new Map(), unas = { n: 0, cost: 0 };
+    const grp = (name) => { const k = provKey(name); if (!groups.has(k)) groups.set(k, { key: k, name: String(name).trim().replace(/\s+/g, ' '), lines: [], pays: [], cost: 0, noCost: 0, est: 0 }); return groups.get(k); };
+    for (const d of docs.filter((x) => x.type === 'quotation' && x.status === 'accepted')) for (const it of d.items || []) {
+      if (it.assign?.status === 'cancelled') continue;
+      if (scope === 'done' && !((svcDate(it) || '9') < t || it.assign?.status === 'completed')) continue;
+      const act = lineVal(it, 'actual_cost'), c = act ?? lineVal(it, 'cost'), us = unitsOf(it.assign || {});
+      if (!us.length) { unas.n++; unas.cost += c || 0; continue; }
+      for (const u of us) {
+        const name = u.provider || '(provider not entered)';
+        if (isOwn(provKey(name))) continue;
+        const g = grp(name), share = c === null ? 0 : r2(c / us.length);
+        g.lines.push({ d, it, share, actual: act !== null, has: c !== null }); g.cost = r2(g.cost + share);
+        if (c === null) g.noCost++; else if (act === null) g.est++;
+      }
+    }
+    for (const p of pays) grp(p.provider).pays.push(p);
+    const provs = [...groups.values()].map((g) => ({ ...g, paid: sum(g.pays, (p) => Number(p.amount)), })).map((g) => ({ ...g, owed: r2(g.cost - g.paid) })).sort((a, b) => b.owed - a.owed);
+    const payable = sum(provs.filter((g) => g.owed > 0), (g) => g.owed), costAll = sum(provs, (g) => g.cost), paidAll = sum(provs, (g) => g.paid);
+    const provCard = (g) => `<div class="card"><div class="row"><b>${esc(g.name)}</b><b class="${g.owed > 0.005 ? 'neg' : ''}">${g.owed > 0.005 ? 'We owe ' + money(g.owed) : g.owed < -0.005 ? 'Overpaid ' + money(-g.owed) : 'Settled'}</b></div>
+      <p class="muted">${g.lines.length} vehicle${g.lines.length === 1 ? '' : 's'} · cost ${money(g.cost)} · paid ${money(g.paid)}${g.est ? ` · ${g.est} line${g.est === 1 ? '' : 's'} still on estimated cost` : ''}${g.noCost ? ` · <span class="neg">${g.noCost} without any cost entered</span>` : ''}</p>
+      <details class="guide" data-k="${esc(g.key)}" ${opened.has(g.key) ? 'open' : ''}><summary>Services, payments and record a payment</summary>
+        ${g.lines.length ? `<div class="tablewrap"><table><thead><tr><th>Date</th><th>Service</th><th>Quotation</th><th class="num">Cost</th><th>Basis</th></tr></thead><tbody>${g.lines.sort((a, b) => String(svcDate(a.it)).localeCompare(svcDate(b.it))).map((l) => `<tr><td>${esc(fdate(svcDate(l.it)))}</td><td>${esc(lineTitle(l.it))}</td><td><a href="#/view/${l.d.id}">${esc(l.d.number)}</a></td><td class="num">${l.has ? money(l.share) : '—'}</td><td>${l.has ? (l.actual ? 'actual' : 'estimated') : 'not entered'}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">No services in this view.</p>'}
+        <h4>Payments to ${esc(g.name)}</h4>
+        ${g.pays.length ? `<div class="tablewrap"><table><thead><tr><th>Date</th><th>Reference / note</th><th class="num">Amount</th><th></th></tr></thead><tbody>${g.pays.map((p) => `<tr><td>${esc(fdate(p.paid_on))}</td><td>${esc(p.ref)}</td><td class="num">${money(p.amount)}</td><td><button type="button" class="mini danger" data-delpay="${esc(p.id)}" data-k="${esc(g.key)}" aria-label="Delete payment">Delete</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">No payments recorded yet.</p>'}
+        <form class="pf" data-prov="${esc(g.name)}" data-k="${esc(g.key)}" novalidate><div class="grid">
+          <label>Date paid<input type="date" name="paid_on" value="${t}" min="${DMIN}" max="${DMAX}"></label>
+          <label>Amount paid<input name="amount" inputmode="decimal" autocomplete="off" maxlength="15" value="${g.owed > 0.005 ? esc(fmtNum(g.owed)) : ''}"></label>
+          <label>Reference / note<input name="ref" maxlength="120" placeholder="e.g. bank transfer ref"></label></div>
+          <p class="err perr" role="alert"></p><button class="primary">Record payment</button></form></details></div>`;
+    v.innerHTML = `<h2>Reports</h2>
+      <div class="grid">${statCard('Customers owe us', money(receivable), `<span class="muted">${custs.length} customer${custs.length === 1 ? '' : 's'}</span>`)}${statCard('We owe providers', money(payable), `<span class="muted">${provs.filter((g) => g.owed > 0.005).length} provider${provs.filter((g) => g.owed > 0.005).length === 1 ? '' : 's'}</span>`, payable > 0)}${statCard('Net position', money(receivable - payable), '<span class="muted">customers owe us − we owe providers</span>', receivable - payable < 0)}${statCard('Invoiced', money(invoiced), `<span class="muted">collected ${money(collected)}</span>`)}</div>
+      <p class="muted">More: <a href="#/profit">Cost vs Profit</a> (estimated and actual profit per quotation) · <a href="#/schedule">Schedule</a> · <a href="#/providers">Service Providers</a> (rates)</p>
+
+      <div class="row"><h3 id="owe">Money we owe service providers</h3><label class="muted">Count <select id="scope"><option value="all" ${scope === 'all' ? 'selected' : ''}>all accepted services</option><option value="done" ${scope === 'done' ? 'selected' : ''}>only services done (past or completed)</option></select></label></div>
+      <p class="muted">Each service's cost (actual if entered, otherwise estimated) is shared between its assigned vehicles and charged to each vehicle's provider (costs come from Cost vs Profit, vehicles and providers from the Schedule). “Own vehicle” is not counted. Total cost ${money(costAll)}, paid ${money(paidAll)}.${unas.n ? ` <span class="neg">${unas.n} service${unas.n === 1 ? '' : 's'} (cost ${money(unas.cost)}) ${unas.n === 1 ? 'has' : 'have'} no vehicle assigned yet, so no provider is charged.</span>` : ''}</p>
+      ${provs.length ? provs.map(provCard).join('') : '<div class="card"><p class="muted">Nothing yet. Assign vehicles on the Schedule page (with the provider) and enter costs on Cost vs Profit.</p></div>'}
+
+      <h3 id="due">Money customers owe us</h3>
+      ${custs.length ? `<div class="card tablewrap"><table><thead><tr><th>Customer</th><th>Invoice</th><th>Payment</th><th>Due</th><th class="num">Amount</th></tr></thead><tbody>${custs.map((c) => `<tr><td colspan="4"><b><a href="#/customer/${esc(c.id)}">${esc(c.name)}</a></b>${c.over ? ` <span class="neg">· ${money(c.over)} overdue</span>` : ''}</td><td class="num"><b>${money(c.owed)}</b></td></tr>${c.rows.sort((a, b) => String(a.due).localeCompare(b.due)).map((x) => `<tr><td></td><td><a href="#/view/${x.d.id}">${esc(x.d.number)}</a></td><td>${esc(x.label)}</td><td class="${x.due && x.due < t ? 'neg' : ''}">${x.due ? esc(fdate(x.due)) + (x.due < t ? ' (overdue)' : '') : '—'}</td><td class="num">${money(x.amount)}</td></tr>`).join('')}`).join('')}</tbody></table></div>` : '<div class="card"><p class="muted">No unpaid invoices.</p></div>'}`;
+    v.onchange = (e) => { if (e.target.id === 'scope') { scope = e.target.value; draw(); } };
+    v.oninput = (e) => { if (e.target.closest?.('form.pf') && e.target.name === 'amount') liveMoney(e.target); };
+    v.onclick = async (e) => {
+      const id = e.target.dataset?.delpay; if (!id) return;
+      if (!confirm('Delete this payment record?')) return;
+      try { await q(sb.from('provider_payments').delete().eq('id', id)); opened.add(e.target.dataset.k); await load(); draw(); } catch (err) { alert(err.message); }
+    };
+    v.onsubmit = async (e) => {
+      const f = e.target; if (!f.classList?.contains('pf')) return;
+      e.preventDefault();
+      const err = f.querySelector('.perr'), amount = parseNum(f.amount.value), paid_on = f.paid_on.value;
+      if (!paid_on || paid_on < DMIN || paid_on > DMAX) return (err.textContent = 'Choose the date paid.');
+      if (!(amount > 0) || amount > MAXAMT) return (err.textContent = 'Enter an amount greater than 0.');
+      try { await q(sb.from('provider_payments').insert({ provider: f.dataset.prov, paid_on, amount, ref: f.ref.value.trim() || null })); opened.add(f.dataset.k); await load(); draw(); } catch (e2) { err.textContent = e2.message; }
+    };
+  };
+  await load(); draw();
 }
 
 /* ---------- one customer: everything for them ---------- */

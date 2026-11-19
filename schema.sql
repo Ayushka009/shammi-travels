@@ -78,3 +78,16 @@ alter table settings add column if not exists discord_webhook text;
 
 -- Live flight status: see flights.sql (run once in the SQL editor, after reminders.sql)
 alter table settings add column if not exists flight_api_key text;
+
+-- Payments we made to service providers (Reports page: money we owe providers = their share of service costs minus these)
+create table if not exists provider_payments (
+  id uuid primary key default gen_random_uuid(),
+  provider text not null,
+  paid_on date not null default current_date,
+  amount numeric not null check (amount > 0),
+  ref text,
+  created_at timestamptz default now()
+);
+alter table provider_payments enable row level security;
+drop policy if exists "auth only" on provider_payments;
+create policy "auth only" on provider_payments for all to authenticated using (true) with check (true);
