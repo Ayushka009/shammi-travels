@@ -7,7 +7,26 @@ const money = (n, min = 2) => `${n < 0 ? '-' : ''}${CONFIG.CURRENCY}${Math.abs(N
 // Everything is stored in Rs. A customer set to USD sees documents converted at the CBSL selling rate of the 15th of the document's month (Settings, USD rates); an earlier month's rate is used if that month has none.
 const curOf = (c) => (c?.currency === 'USD' ? 'USD' : 'LKR');
 const usdFmt = (n, min = 2) => `${n < 0 ? '-' : ''}US$${Math.abs(Number(n || 0)).toLocaleString('en-US', { minimumFractionDigits: min, maximumFractionDigits: 2 })}`;
-const fxFor = (rates, iso) => { const m = String(iso || '').slice(0, 7); const k = Object.keys(rates || {}).filter((x) => x <= m && +rates[x] > 0).sort().at(-1); return k ? { month: k, rate: +rates[k] } : null; };
+const rv = (x) => +(x?.r ?? x); // a month's rate is a number (typed in) or {r, auto: true} (filled in from the public rate API)
+const fxFor = (rates, iso) => { const m = String(iso || '').slice(0, 7); const k = Object.keys(rates || {}).filter((x) => x <= m && rv(rates[x]) > 0).sort().at(-1); return k ? { month: k, rate: rv(rates[k]), auto: !!rates[k].auto } : null; };
+// Months from the last six whose 15th has passed and that have no rate yet are filled in once per visit from a free public API (market USD→LKR rate on the 15th, not CBSL's own figure); typed-in rates are never overwritten.
+let fxTried = false;
+async function autoRates() {
+  if (fxTried) return; fxTried = true;
+  const rates = { ...(S.usd_rates || {}) }, now = new Date(); let changed = false;
+  for (let i = 0; i < 6; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 15);
+    const m = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    if (d > now || rv(rates[m]) > 0) continue;
+    try {
+      const j = await (await fetch(`https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@${m}-15/v1/currencies/usd.json`, { signal: AbortSignal.timeout(8000) })).json();
+      const r = Math.round(j.usd.lkr * 100) / 100;
+      if (r > 1 && r < 10000) { rates[m] = { r, auto: true }; changed = true; }
+    } catch { /* offline or not published yet: try again next visit */ }
+  }
+  if (changed) { await q(sb.from('settings').upsert({ id: 1, usd_rates: rates })); S = { ...S, usd_rates: rates }; }
+}
+
 let dm = money; // money formatter of the document on screen (set in view())
 const fdate = (iso) => iso ? new Date(iso + 'T00:00:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }).replace(',', '') : '';
 const ldate = (iso, sep = ' ') => iso ? new Date(iso + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }).replace(/ /g, sep) : '';
@@ -123,6 +142,7 @@ async function route(soft) {
   if (!soft) v.innerHTML = '<p class="muted">Loading…</p>';
   try {
     await loadSettings();
+    await autoRates().catch(() => {});
     const fn = { dashboard, customers, customer, list, edit, view, settings, profit, providers, templates, reports, schedule: scheduleView }[page] || dashboard;
     await fn(v, a, b, c, e5);
     if (keep) { const ds = [...v.querySelectorAll('details')]; if (ds.length === keep.open.length) ds.forEach((d, i) => { d.open = keep.open[i]; }); window.scrollTo(0, keep.y); }
@@ -228,8 +248,8 @@ async function settings(v) {
     ${termsGuide}
     <button class="primary">Save settings</button> <span id="ok" class="muted" role="status"></span></form>
     <div class="card" id="fxc"><h3>US dollar rates</h3>
-      <p class="muted">Everything is kept in Rs. Customers billed in US$ see documents converted at the Central Bank of Sri Lanka USD selling rate on the 15th of the document's month. Enter one rate per month (rupees per US$1); a month with no rate uses the latest earlier one.</p>
-      <div class="tablewrap"><table><thead><tr><th>Month</th><th class="num">Rs per US$1</th><th></th></tr></thead><tbody>${Object.entries(S.usd_rates || {}).sort().reverse().map(([m, r]) => `<tr><td>${esc(m)}</td><td class="num">${esc(fmtNum(String(r)))}</td><td><button type="button" class="mini danger" data-fxdel="${esc(m)}">Delete</button></td></tr>`).join('') || '<tr><td colspan="3" class="muted">No rates yet.</td></tr>'}</tbody></table></div>
+      <p class="muted">Everything is kept in Rs. Customers billed in US$ see documents converted at the Central Bank of Sri Lanka USD selling rate on the 15th of the document's month. Rates marked <i>auto</i> are filled in each month from a free public exchange-rate service (the market rate on the 15th, which can differ a little from CBSL's own selling rate). Typing a rate for a month replaces it, and typed rates are never overwritten. A month with no rate uses the latest earlier one.</p>
+      <div class="tablewrap"><table><thead><tr><th>Month</th><th class="num">Rs per US$1</th><th></th></tr></thead><tbody>${Object.entries(S.usd_rates || {}).sort().reverse().map(([m, r]) => `<tr><td>${esc(m)}</td><td class="num">${esc(fmtNum(String(rv(r))))}${r?.auto ? ' <span class="muted">auto</span>' : ''}</td><td><button type="button" class="mini danger" data-fxdel="${esc(m)}">Delete</button></td></tr>`).join('') || '<tr><td colspan="3" class="muted">No rates yet.</td></tr>'}</tbody></table></div>
       <form id="fxf" class="grid"><label>Month <input type="month" name="m" required></label><label>Selling rate on the 15th (Rs) <input name="r" inputmode="decimal" autocomplete="off" maxlength="9" required></label>
         <div><button class="primary">Save rate</button> <span id="fxok" class="muted" role="status"></span></div></form></div>`;
   const saveRates = async (rates) => { await q(sb.from('settings').upsert({ id: 1, usd_rates: rates })); S = { ...S, usd_rates: rates }; route(true); };
@@ -1318,7 +1338,7 @@ async function view(v, id) {
           ? `${esc(d.number)}<br>Invoice date: ${esc(fdate(d.issue_date))}<br>Due date: ${esc(d.due_date ? fdate(d.due_date) : '—')}${f.quotation ? `<br>Ref: ${esc(f.quotation)}` : ''}<br><b class="stamp ${stamp === 'PAID' ? 'ok' : ''}">${stamp}</b>`
           : `${esc(d.number)}${d.type === 'agreement' ? '' : '<br>' + esc(KINDS[kindOf(d)])}<br>Date: ${esc(d.issue_date)}${d.due_date ? `<br>Valid until: ${esc(d.due_date)}` : ''}`}</div></div>
       ${d.type === 'agreement' ? '' : `<p><b>Bill to:</b><br>${esc(c.name)}<br>${esc(c.address)}<br>${esc(c.phone)} ${esc(c.email)}</p>`}
-      ${curOf(c) === 'USD' ? (fx ? `<p class="muted" style="font-size:12px">All amounts are in US dollars (US$), converted at Rs ${esc(fmtNum(String(fx.rate)))} per US$1, the Central Bank of Sri Lanka selling rate on 15 ${esc(new Date(fx.month + '-15T00:00:00').toLocaleDateString('en-GB', { month: 'long', year: 'numeric' }))}.</p>` : '<p class="err noprint">This customer is billed in USD but no USD rate is saved for this month: amounts are shown in Rs. Add the rate in Settings.</p>') : ''}
+      ${curOf(c) === 'USD' ? (fx ? `<p class="muted" style="font-size:12px">All amounts are in US dollars (US$), converted at Rs ${esc(fmtNum(String(fx.rate)))} per US$1, the ${fx.auto ? 'market exchange rate' : 'Central Bank of Sri Lanka selling rate'} on 15 ${esc(new Date(fx.month + '-15T00:00:00').toLocaleDateString('en-GB', { month: 'long', year: 'numeric' }))}.</p>` : '<p class="err noprint">This customer is billed in USD but no USD rate is saved for this month: amounts are shown in Rs. Add the rate in Settings.</p>') : ''}
       ${body}${d.notes ? `<p><b>Notes:</b> ${esc(d.notes)}</p>` : ''}</div>`;
   $('#print').onclick = () => print();
   // file name like "Invoice - Curtin UNI.pdf" (agreements use the client organisation when it is filled in)
