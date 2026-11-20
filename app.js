@@ -306,7 +306,7 @@ async function profit(v, id) {
   const E = calc.filter((x) => ok(x) && x.p.e.n), A = calc.filter((x) => ok(x) && x.p.a.n);
   const sum = (arr, f) => arr.reduce((s, x) => s + f(x), 0);
   const ep = sum(E, (x) => x.p.e.profit), ap = sum(A, (x) => x.p.a.profit), ar = sum(A, (x) => x.p.a.rev), vr = sum(calc.filter(ok), (x) => x.p.variance);
-  v.innerHTML = `<h2>Cost vs Profit</h2>
+  v.innerHTML = `<div class="row"><h2>Cost vs Profit</h2><button type="button" id="xl">Download Excel</button></div>
     <div class="grid">
       ${statCard('Estimated cost', money(sum(E, (x) => x.p.e.cost)), `${E.length} quotations`)}
       ${statCard('Actual cost', money(sum(A, (x) => x.p.a.cost)), `${A.length} quotations`)}
@@ -322,6 +322,13 @@ async function profit(v, id) {
        <td class="num ${p.e.profit < 0 ? 'neg' : ''}">${p.e.n ? money(p.e.profit) : '—'}</td><td class="num ${p.a.profit < 0 ? 'neg' : ''}">${p.a.n ? money(p.a.profit) : '—'}</td>
        <td class="num">${p.a.n ? pct(p.a.margin) : p.e.n ? `${pct(p.e.margin)}<br><span class="muted">est.</span>` : '—'}</td></tr>`;
     }).join('')}</tbody></table></div>` : '<p class="muted">No quotations yet.</p>'}</div>`;
+  const n2 = (x) => (x === null || x === undefined ? null : r2(+x));
+  $('#xl').onclick = (e) => downloadXlsx(e.currentTarget, 'Cost report', {
+    Quotations: [['Quotation', 'Customer', 'Status', 'Date', 'Revenue (Rs)', 'Estimated cost (Rs)', 'Actual cost (Rs)', 'Estimated profit (Rs)', 'Actual profit (Rs)', 'Margin %'],
+      ...calc.map(({ d, p }) => [d.number, d.customers?.name || '', d.status, d.issue_date, r2(Number(d.total)), p.e.n ? r2(p.e.cost) : null, p.a.n ? r2(p.a.cost) : null, p.e.n ? r2(p.e.profit) : null, p.a.n ? r2(p.a.profit) : null, p.a.n ? n2(p.a.margin) : p.e.n ? n2(p.e.margin) : null])],
+    Lines: [['Quotation', 'Customer', 'Status', 'Service date', 'Service', 'Vehicle(s)', 'Provider(s)', 'Revenue (Rs)', 'Estimated cost (Rs)', 'Actual cost (Rs)', 'Profit (Rs)', 'Profit based on'],
+      ...rows.flatMap((d) => (d.items || []).map((it) => { const e = lineVal(it, 'cost'), a = lineVal(it, 'actual_cost'), c = a ?? e; return [d.number, d.customers?.name || '', d.status, svcDate(it) || '', lineTitle(it), it.vehicle || fleetText(fleetOf(it)), provNames(it), r2(+it.rate || 0), n2(e), n2(a), c === null ? null : r2((+it.rate || 0) - c), a !== null ? 'actual' : e !== null ? 'estimated' : '']; }))],
+  });
 }
 
 async function profitDetail(v, id) {
@@ -750,7 +757,7 @@ async function reports(v) {
           <label>Amount paid<input name="amount" inputmode="decimal" autocomplete="off" maxlength="15" value="${g.owed > 0.005 ? esc(fmtNum(g.owed)) : ''}"></label>
           <label>Reference / note<input name="ref" maxlength="120" placeholder="e.g. bank transfer ref"></label></div>
           <p class="err perr" role="alert"></p><button class="primary">Record payment</button></form></details></div>`;
-    v.innerHTML = `<h2>Reports</h2>
+    v.innerHTML = `<div class="row"><h2>Reports</h2><button type="button" id="xl">Download Excel</button></div>
       <div class="grid">${statCard('Customers owe us', money(receivable), `<span class="muted">${custs.length} customer${custs.length === 1 ? '' : 's'}</span>`)}${statCard('We owe providers', money(payable), `<span class="muted">${provs.filter((g) => g.owed > 0.005).length} provider${provs.filter((g) => g.owed > 0.005).length === 1 ? '' : 's'}</span>`, payable > 0)}${statCard('Net position', money(receivable - payable), '<span class="muted">customers owe us − we owe providers</span>', receivable - payable < 0)}${statCard('Invoiced', money(invoiced), `<span class="muted">collected ${money(collected)}</span>`)}</div>
       <p class="muted">More: <a href="#/profit">Cost vs Profit</a> (estimated and actual profit per quotation) · <a href="#/schedule">Schedule</a> · <a href="#/providers">Service Providers</a> (rates)</p>
 
@@ -760,6 +767,13 @@ async function reports(v) {
 
       <h3 id="due">Money customers owe us</h3>
       ${custs.length ? `<div class="card tablewrap"><table><thead><tr><th>Customer</th><th>Invoice</th><th>Payment</th><th>Due</th><th class="num">Amount</th></tr></thead><tbody>${custs.map((c) => `<tr><td colspan="4"><b><a href="#/customer/${esc(c.id)}">${esc(c.name)}</a></b>${c.over ? ` <span class="neg">· ${money(c.over)} overdue</span>` : ''}</td><td class="num"><b>${money(c.owed)}</b></td></tr>${c.rows.sort((a, b) => String(a.due).localeCompare(b.due)).map((x) => `<tr><td></td><td><a href="#/view/${x.d.id}">${esc(x.d.number)}</a></td><td>${esc(x.label)}</td><td class="${x.due && x.due < t ? 'neg' : ''}">${x.due ? esc(fdate(x.due)) + (x.due < t ? ' (overdue)' : '') : '—'}</td><td class="num">${money(x.amount)}</td></tr>`).join('')}`).join('')}</tbody></table></div>` : '<div class="card"><p class="muted">No unpaid invoices.</p></div>'}`;
+    $('#xl').onclick = (e) => downloadXlsx(e.currentTarget, 'Accounts report', {
+      'Provider balances': [['Provider', 'Cost (Rs)', 'Paid (Rs)', 'We owe (Rs)'], ...provs.map((g) => [g.name, g.cost, g.paid, g.owed])],
+      'Provider costs': [['Provider', 'Service date', 'Service', 'Quotation', 'Customer', 'Cost share (Rs)', 'Basis'], ...provs.flatMap((g) => g.lines.map((l) => [g.name, svcDate(l.it) || '', lineTitle(l.it), l.d.number, l.d.customers?.name || '', l.has ? l.share : null, l.has ? (l.actual ? 'actual' : 'estimated') : 'not entered']))],
+      'Provider payments': [['Provider', 'Date', 'Reference / note', 'Amount (Rs)'], ...provs.flatMap((g) => g.pays.map((p) => [g.name, p.paid_on, p.ref || '', Number(p.amount)]))],
+      Invoices: [['Invoice', 'Customer', 'Invoice date', 'Due date', 'Status', 'Total (Rs)', 'Paid (Rs)', 'Balance (Rs)'], ...docs.filter((d) => d.type === 'invoice').map((d) => { const paid = paidOf(d), live = d.status !== 'cancelled'; return [d.number, d.customers?.name || '', d.issue_date, d.due_date || '', d.status, r2(Number(d.total)), paid, live ? r2(Number(d.total) - paid) : 0]; })],
+      'Customer instalments owed': [['Customer', 'Invoice', 'Payment', 'Due', 'Amount (Rs)', 'Overdue'], ...custs.flatMap((c) => c.rows.map((x) => [c.name, x.d.number, x.label, x.due || '', x.amount, x.due && x.due < t ? 'yes' : '']))],
+    });
     v.onchange = (e) => { if (e.target.id === 'scope') { scope = e.target.value; draw(); } };
     v.oninput = (e) => { if (e.target.closest?.('form.pf') && e.target.name === 'amount') liveMoney(e.target); };
     v.onclick = async (e) => {
@@ -1085,6 +1099,32 @@ const loadPdfLib = () => pdfLib ||= new Promise((resolve, reject) => {
   s.onerror = () => { pdfLib = null; reject(new Error('Could not load the PDF tool. Check your internet connection and try again.')); };
   document.head.appendChild(s);
 });
+
+// Excel download (.xlsx) for book-keeping: SheetJS 0.18.5 from cdnjs, loaded only when you click Download Excel; pinned with the hash cdnjs publishes.
+const XLSX_LIB = { src: 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js', integrity: 'sha512-r22gChDnGvBylk90+2e/ycr3RVrDi8DIOkIGNhJlKfuyQM4tIRAI062MaV8sfjQKYVGjOBaZBOA87z+IhZE9DA==' };
+let xlsxLib = null;
+const loadXlsx = () => xlsxLib ||= new Promise((resolve, reject) => {
+  if (window.XLSX) return resolve(window.XLSX);
+  const s = document.createElement('script');
+  Object.assign(s, { src: XLSX_LIB.src, integrity: XLSX_LIB.integrity, crossOrigin: 'anonymous' });
+  s.onload = () => resolve(window.XLSX);
+  s.onerror = () => { xlsxLib = null; reject(new Error('Could not load the Excel tool. Check your internet connection and try again.')); };
+  document.head.appendChild(s);
+});
+// sheets = { 'Sheet name': [[header…], [row…], …] }; amounts are plain numbers in Rs so they can be summed in Excel
+async function downloadXlsx(btn, file, sheets) {
+  const label = btn.textContent; btn.disabled = true; btn.textContent = 'Preparing…';
+  try {
+    const X = await loadXlsx(), wb = X.utils.book_new();
+    for (const [name, rows] of Object.entries(sheets)) {
+      const ws = X.utils.aoa_to_sheet(rows.length > 1 ? rows : [...rows, ['No data']]);
+      ws['!cols'] = rows[0].map((h, c) => ({ wch: Math.min(45, Math.max(String(h).length, ...rows.slice(1).map((r) => String(r[c] ?? '').length)) + 2) }));
+      X.utils.book_append_sheet(wb, ws, name.slice(0, 31));
+    }
+    X.writeFile(wb, `${file} ${today()}.xlsx`);
+  } catch (err) { alert(err.message); } finally { btn.disabled = false; btn.textContent = label; }
+}
+const provNames = (it) => unitsOf(it.assign || {}).map((u) => u.provider).filter(Boolean).join(', ');
 
 // Page breaks for the PDF: the PDF tool slices one tall image at fixed heights and drifts a few pixels per page, so it can cut a
 // line in half. Instead, measure every block and push any block that would cross a page boundary down to the next page.
